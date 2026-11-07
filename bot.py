@@ -495,9 +495,13 @@ async def choose_group(c: CallbackQuery):
     group = c.data.split(":", 1)[1]
     if group not in await list_groups():
         await c.answer("Этой группы нет в расписании.", show_alert=True); return
+    user = await get_user(c.from_user.id)
+    role = "admin" if c.from_user.id == ADMIN_ID else (user["role"] if user else "student")
+    # A saved inline group button can outlive the user's database row (for
+    # example after a service database reset). Recreate the user before saving.
+    await add_user(c.from_user.id, c.from_user.full_name, role)
     await set_group(c.from_user.id, group)
     user = await get_user(c.from_user.id)
-    role = "admin" if c.from_user.id == ADMIN_ID else user["role"]
     await safe_edit(c.message, f"🎓 <b>Группа сохранена: {escape(group)}</b>\n\nВыбери раздел:", reply_markup=main_menu(role, user["group_name"]))
     await c.answer()
 
