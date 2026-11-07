@@ -35,6 +35,13 @@
 6. Запусти:
    `.venv/bin/python bot.py`
 
+## Развёртывание на Railway
+В репозитории есть `railway.json`: Railway запускает бота как постоянно работающий процесс и перезапускает его после сбоя. Для деплоя выбери этот GitHub-репозиторий и ветку `main`.
+
+В Variables добавь `BOT_TOKEN`, `ADMIN_ID`, `TIMEZONE=Asia/Novokuznetsk` и `DATABASE_PATH=/data/college.db`. Прикрепи Volume к сервису по пути `/data`, чтобы база пользователей сохранялась между перезапусками и новыми версиями.
+
+Чтобы бот показывал расписание, подключи Google Sheets через `GOOGLE_SHEET_ID` и `GOOGLE_SERVICE_ACCOUNT_JSON` либо отдельно предоставь ему файл расписания через Volume и переменную `SCHEDULE_XLSX`. Таблицы и файлы расписания в публичный репозиторий не добавляй. Токен задавай только в секретных Variables хостинга.
+
 ## Google Таблица
 Создай Google Spreadsheet с листами и заголовками:
 
