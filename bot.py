@@ -87,7 +87,7 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")],
             [InlineKeyboardButton(text="🔔 Звонки", callback_data="menu|bells")],
             [InlineKeyboardButton(text="👨‍🏫 Преподаватель", callback_data="menu|teachers"), InlineKeyboardButton(text="🚪 Кабинет", callback_data="menu|rooms")],
-            [InlineKeyboardButton(text="🎓 Группа / специальность", callback_data="menu|group")],
+            [InlineKeyboardButton(text="🎓 Группа / специальность", callback_data="menu|group")], [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education")],
             [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
         ]
@@ -150,7 +150,7 @@ async def show_education_menu(target, group_name):
     buttons = [
         [InlineKeyboardButton(text="📅 Календарный график 2026–2027", callback_data="edu|calendar")],
         [InlineKeyboardButton(text="📘 Учебные планы 2026–2027", callback_data="edu|plans")],
-        [InlineKeyboardButton(text="🎓 Программы ГИА", callback_data="edu|gia")],
+        [InlineKeyboardButton(text="🎓 Программы ГИА", callback_data="edu|gia")], [InlineKeyboardButton(text="🔗 Официальное расписание КузПК", url="https://kuzpc.kemobl.ru/studentu/raspisanie/")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
     ]
     await safe_edit(target,
@@ -525,7 +525,7 @@ def schedule_keyboard(day: date, mode: str, page: int = 0):
         day_for_daily = day
     toggle = InlineKeyboardButton(text="📆 Неделя" if mode == "d" else "📅 По дням",
                                  callback_data=f"sc|{'w' if mode == 'd' else 'd'}|{week_anchor if mode == 'd' else day_for_daily:%Y%m%d}|0")
-    return InlineKeyboardMarkup(inline_keyboard=[nav, [toggle, InlineKeyboardButton(text="✖ Закрыть", callback_data="sc|x|0|0")]])
+    return InlineKeyboardMarkup(inline_keyboard=[nav, [toggle, InlineKeyboardButton(text="↩️ Назад", callback_data="menu|schedule")]])
 
 async def render_schedule(target, uid: int, day: date, mode: str = "d", page: int = 0, edit: bool = False):
     u = await get_user(uid)
