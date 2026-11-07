@@ -1,4 +1,4 @@
-import os, json
+import os, json, re
 from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
@@ -72,7 +72,7 @@ def _collapse_lessons(rows):
     return merged
 
 def _new_schedule_rows():
-    """Convert the two 7 Nov workbook views into common schedule records."""
+    """Convert the group and teacher weekly workbooks into schedule records."""
     global _NEW_SCHEDULE_CACHE
     if _NEW_SCHEDULE_CACHE is not None:
         return _NEW_SCHEDULE_CACHE
@@ -84,16 +84,19 @@ def _new_schedule_rows():
             if not os.path.exists(path): continue
             ws = openpyxl.load_workbook(path, read_only=True, data_only=True)["Текущее расписание"]
             raw = list(ws.iter_rows(values_only=True))
-            schedule_date = None
-            for row in raw[:8]:
-                for value in row:
-                    if value:
-                        try:
-                            schedule_date = datetime.strptime(str(value).split("_")[0], "%d.%m.%Y").date()
-                            break
-                        except ValueError: pass
-                if schedule_date: break
-            if not schedule_date: continue
+            # The date headers are on row 8, one per weekday block. Excel
+            # exports them as e.g. "09.11.2026_x000D_\\nПОНЕДЕЛЬНИК".
+            date_headers = raw[7] if len(raw) > 7 else ()
+            day_blocks = []
+            for base in range(5, len(date_headers), 5):
+                value = str(date_headers[base] or "")
+                match = re.search(r"(\d{2}\.\d{2}\.\d{4})", value)
+                if match:
+                    try:
+                        day_blocks.append((base, datetime.strptime(match.group(1), "%d.%m.%Y").date()))
+                    except ValueError:
+                        pass
+            if not day_blocks: continue
             owner = None
             for idx in range(12, len(raw)-1):
                 row, following = raw[idx], raw[idx+1]
@@ -106,26 +109,25 @@ def _new_schedule_rows():
                 except (TypeError, ValueError, IndexError):
                     continue
                 if pair < 1 or lesson < 1 or not owner: continue
-                room = str(row[8]).strip() if len(row) > 8 and row[8] is not None else ""
-                # F and H are the two subgroup columns in the group view; in
-                # the teacher view the course occupies the merged F:H area.
-                subject_cells = [row[5] if len(row) > 5 else None,
-                                 row[7] if view == "group" and len(row) > 7 else None]
-                next_cells = [following[5] if len(following) > 5 else None,
-                              following[7] if view == "group" and len(following) > 7 else None]
-                for sub, subject_value in enumerate(subject_cells):
-                    subject = str(subject_value).strip() if subject_value is not None else ""
-                    if not subject: continue
-                    related = next_cells[sub]
-                    if view == "group":
-                        group, teacher = owner, str(related).strip() if related is not None else ""
-                    else:
-                        teacher, group = owner, str(related).strip() if related is not None else ""
-                    if not group: continue
-                    record = {"date": schedule_date.isoformat(), "group": group,
-                              "lesson_no": pair, "lesson": "", "subject": subject,
-                              "teacher": teacher, "room": room}
-                    (group_output if view == "group" else teacher_output).append(record)
+                for base, schedule_date in day_blocks:
+                    subject_columns = (base, base + 2) if view == "group" else (base,)
+                    for subject_column in subject_columns:
+                        subject_value = row[subject_column] if len(row) > subject_column else None
+                        subject = str(subject_value).strip() if subject_value is not None else ""
+                        if not subject: continue
+                        related = following[subject_column] if len(following) > subject_column else None
+                        room_column = base + 3
+                        room_value = row[room_column] if len(row) > room_column else None
+                        room = str(room_value).strip() if room_value is not None else ""
+                        if view == "group":
+                            group, teacher = owner, str(related).strip() if related is not None else ""
+                        else:
+                            teacher, group = owner, str(related).strip() if related is not None else ""
+                        if not group: continue
+                        record = {"date": schedule_date.isoformat(), "group": group,
+                                  "lesson_no": pair, "lesson": "", "subject": subject,
+                                  "teacher": teacher, "room": room}
+                        (group_output if view == "group" else teacher_output).append(record)
         # The group workbook is the primary view; the teacher workbook fills
         # only group/periods absent from it, avoiding duplicate subgroup rows.
         covered = {(r["group"], str(r["lesson_no"])) for r in group_output}
@@ -146,6 +148,9 @@ async def _values(tab):
         return []
 
 async def get_groups():
+    new_rows = _new_schedule_rows()
+    if new_rows:
+        return sorted({str(r["group"]).strip() for r in new_rows if r.get("group")})
     rows = await _values("Группы")
     found = [str(r.get("group","")).strip() for r in rows if r.get("group")]
     rows = _local_rows("Расписание пар")
@@ -154,6 +159,9 @@ async def get_groups():
     return sorted(set(found)) or DEMO_GROUPS
 
 async def get_schedule(group, day: date):
+    new_rows = _new_schedule_rows()
+    if new_rows:
+        return _collapse_lessons([r for r in new_rows if r["date"] == day.isoformat() and r["group"] == group])
     rows = await _values("Расписание")
     if rows:
         result = [r for r in rows if str(r.get("group","")).strip() == group
@@ -178,6 +186,16 @@ async def get_week_schedule(group, monday: date):
     """Load one week's schedule in a single source read, indexed by date."""
     days = [monday + timedelta(days=offset) for offset in range(7)]
     by_day = {day: [] for day in days}
+    new_rows = _new_schedule_rows()
+    if new_rows:
+        for row in new_rows:
+            if row.get("group") != group: continue
+            try:
+                row_day = date.fromisoformat(row["date"])
+            except (KeyError, ValueError):
+                continue
+            if row_day in by_day: by_day[row_day].append(row)
+        return {day: _collapse_lessons(day_rows) for day, day_rows in by_day.items()}
     rows = await _values("Расписание")
     if rows:
         for row in rows:
@@ -213,6 +231,10 @@ async def get_week_schedule(group, monday: date):
     return {day: _collapse_lessons(day_rows) for day, day_rows in by_day.items()}
 
 async def get_teachers():
+    new_rows = _new_schedule_rows()
+    if new_rows:
+        return [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
+                for r in new_rows if r.get("teacher")]
     rows = await _values("Преподаватели")
     local = [{"teacher": r.get("Преподаватель"), "subject": r.get("Дисциплина"), "groups": r.get("Группа")}
              for r in _local_rows("Расписание пар") if r.get("Преподаватель")]
@@ -220,6 +242,9 @@ async def get_teachers():
               for r in _new_schedule_rows() if r.get("teacher")]
     return rows + local
 async def get_rooms():
+    new_rows = _new_schedule_rows()
+    if new_rows:
+        return [{"room": room} for room in {r.get("room") for r in new_rows if r.get("room")}]
     rows = await _values("Аудитории")
     local = [{"room": room} for room in {r.get("Аудитория") for r in _local_rows("Расписание пар") if r.get("Аудитория")}]
     local += [{"room": r["room"]} for r in _new_schedule_rows() if r.get("room")]
@@ -276,6 +301,11 @@ def room_building(room):
     return 0
 
 async def get_entity_schedule(kind, value, day: date):
+    new_rows = _new_schedule_rows()
+    if new_rows:
+        key = "teacher" if kind == "teacher" else "room"
+        return _collapse_lessons([{k: r.get(k) for k in ("lesson_no", "lesson", "subject", "teacher", "room", "group", "start", "end")}
+                                  for r in new_rows if r["date"] == day.isoformat() and str(r.get(key, "")).strip() == value])
     rows = await _values("Расписание")
     if rows:
         result = []
