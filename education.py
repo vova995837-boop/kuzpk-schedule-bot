@@ -1,12 +1,16 @@
 """Public education documents published on the KuzPK website."""
 import asyncio
+import os
 import re
 import time
 from html.parser import HTMLParser
 from urllib.parse import quote, urljoin, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
+from dotenv import load_dotenv
 
+load_dotenv()
 from moodle import SPECIALTY_CODES
+from drive_store import DRIVE_FOLDER_ID, SERVICE_ACCOUNT_JSON, list_files as drive_files, download_file as drive_download
 
 EDUCATION_URL = (
     "https://kuzpc.kemobl.ru/Svedeniya-ob-obrazovatelnoj-organizacii-"
@@ -17,7 +21,7 @@ CALENDAR_SECTION = "Календарные графики учебного пр�
 GIA_SECTION = "Программы ГИА"
 PLANS_SECTION = "2026-2027г."
 _CACHE = {}
-_CACHE_TTL = 1800
+_CACHE_TTL = 180
 
 
 class EducationError(Exception):
@@ -114,19 +118,65 @@ def _fetch_documents(group_name, kind):
         raise EducationError("Не удалось загрузить документы с сайта колледжа. Попробуй ещё раз позже.") from exc
 
 
+def _drive_documents(group_name, kind):
+    """Read official PDFs copied into the configured Drive knowledge folder."""
+    code = _specialty_code(group_name)
+    if not code or not DRIVE_FOLDER_ID or not SERVICE_ACCOUNT_JSON:
+        return None
+    tokens = {
+        "calendar": ("календар", "calendar"),
+        "plans": ("учебн", "plan"),
+        "gia": ("гиа", "gia", "государственн", "итогов"),
+        "gia_archive": ("гиа", "gia", "2025-2026"),
+    }.get(kind, ())
+    pattern = re.compile(rf"(?<!\d){re.escape(code)}(?!\d)")
+    matches = []
+    try:
+        for item in drive_files():
+            filename = item.get("name", "")
+            if not filename.lower().endswith(".pdf") or not pattern.search(filename):
+                continue
+            location = (item.get("drive_path", "") + " " + filename).casefold()
+            if tokens and not any(token in location for token in tokens):
+                continue
+            matches.append({
+                "name": os.path.splitext(filename)[0],
+                "url": "drivefile:" + item["id"],
+                "drive_id": item["id"],
+                "filename": filename,
+            })
+    except Exception as exc:
+        raise EducationError("Не удалось прочитать документы из Google Drive.") from exc
+    return matches
+
+
 async def list_documents(group_name, kind):
     key = (str(group_name), kind)
     now = time.monotonic()
     cached = _CACHE.get(key)
     if cached and now - cached[0] < _CACHE_TTL:
         return cached[1]
-    documents = await asyncio.to_thread(_fetch_documents, group_name, kind)
+    documents = await asyncio.to_thread(_drive_documents, group_name, kind)
+    # This is a fixed historical archive. Never silently substitute current-site GIA
+    # files for a requested 2025–2026 archive document.
+    if kind == "gia_archive":
+        documents = documents or []
+    elif documents is None or not documents:
+        documents = await asyncio.to_thread(_fetch_documents, group_name, kind)
     _CACHE[key] = (now, documents)
     return documents
 
 
 def _download_document(url):
     """Return document bytes and a safe filename for Telegram upload."""
+    if url.startswith("drivefile:"):
+        file_id = url.split(":", 1)[1]
+        item = next((f for f in drive_files() if f.get("id") == file_id), None)
+        filename = os.path.basename(item.get("name", "document.pdf")) if item else "document.pdf"
+        data = drive_download(file_id)
+        if len(data) > 49 * 1024 * 1024:
+            raise EducationError("Файл превышает ограничение Telegram для отправки ботом.")
+        return data, filename[:180]
     request = Request(url, headers={"User-Agent": "KuzPKScheduleBot/1.0"})
     with urlopen(request, timeout=30) as response:
         content_type = response.headers.get_content_type()

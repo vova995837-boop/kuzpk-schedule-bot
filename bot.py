@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from db import init_db, add_user, get_user, set_group, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_all_announcement
-from moodle import list_group_courses, categorize_courses, MoodleError
+from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
 from education import list_documents, download_document, EducationError, EDUCATION_URL, PLANS_URL
 
 load_dotenv()
@@ -63,6 +63,18 @@ def back_button(destination="home"):
     label = "🏠 Главное меню" if destination == "home" else "↩️ Назад"
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"menu|{destination}")]])
 
+def schedule_menu_keyboard():
+    rows = [
+        [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")],
+        [InlineKeyboardButton(text="🔔 Звонки", callback_data="menu|bells")],
+        [InlineKeyboardButton(text="👨‍🏫 Преподаватель", callback_data="menu|teachers"), InlineKeyboardButton(text="🚪 Кабинет", callback_data="menu|rooms")],
+        [InlineKeyboardButton(text="🎓 Группа / специальность", callback_data="menu|group")],
+        [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education_schedule")],
+        [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")],
+        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 async def safe_edit(target, text, reply_markup=None):
     try:
         await target.edit_text(text, reply_markup=reply_markup)
@@ -83,27 +95,22 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
         role = "admin" if c.from_user.id == ADMIN_ID else (u["role"] if u else "student")
         await safe_edit(c.message, "🎓 <b>ПАРА | КузПК</b>\nВыбери раздел:", reply_markup=main_menu(role, u["group_name"] if u else None))
     elif action == "schedule":
-        rows = [
-            [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")],
-            [InlineKeyboardButton(text="🔔 Звонки", callback_data="menu|bells")],
-            [InlineKeyboardButton(text="👨‍🏫 Преподаватель", callback_data="menu|teachers"), InlineKeyboardButton(text="🚪 Кабинет", callback_data="menu|rooms")],
-            [InlineKeyboardButton(text="🎓 Группа / специальность", callback_data="menu|group")], [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education")],
-            [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")],
-            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
-        ]
-        await safe_edit(c.message, "📅 <b>Расписание</b>\nВыбери, что посмотреть:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await safe_edit(c.message, "📅 <b>Расписание</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard())
     elif action == "courses":
         user = await get_user(c.from_user.id)
         if not user or not is_courses_group(user.get("group_name")):
             await c.answer("Сначала выбери свою учебную группу.", show_alert=True)
             return
         await show_moodle_courses(c.message, user.get("group_name"))
-    elif action == "education":
+    elif action in ("education", "education_schedule"):
         user = await get_user(c.from_user.id)
         if not user or not is_courses_group(user.get("group_name")):
             await c.answer("Сначала выбери свою учебную группу.", show_alert=True)
             return
-        await show_education_menu(c.message, user.get("group_name"))
+        await show_education_menu(
+            c.message, user.get("group_name"),
+            back_to="schedule" if action == "education_schedule" else "home",
+        )
     elif action == "sports":
         await show_sports_sections(c.message)
     elif action in ("today", "tomorrow"):
@@ -133,7 +140,11 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
             await c.answer("Недостаточно прав.", show_alert=True); return
         rows = [[InlineKeyboardButton(text="📣 Объявление группе", callback_data="manage|group")]]
         if c.from_user.id == ADMIN_ID:
-            rows += [[InlineKeyboardButton(text="📢 Объявление всем", callback_data="manage|all")], [InlineKeyboardButton(text="👥 Назначить роль", callback_data="manage|roles")]]
+            rows += [
+                [InlineKeyboardButton(text="📊 Пользователи", callback_data="manage|stats")],
+                [InlineKeyboardButton(text="📢 Объявление всем", callback_data="manage|all")],
+                [InlineKeyboardButton(text="👥 Назначить роль", callback_data="manage|roles")],
+            ]
         rows += [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]]
         await safe_edit(c.message, "🛠 <b>Управление</b>\nВыбери действие:", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
     await c.answer()
@@ -143,15 +154,39 @@ EDUCATION_TYPES = {
     "calendar": ("Календарный график · 2026–2027, I семестр", "📅"),
     "plans": ("Учебные планы · 2026–2027", "📘"),
     "gia": ("Программы ГИА", "🎓"),
+    "gia_archive": ("Архив программ ГИА · 2025–2026", "🗂️"),
+}
+
+GIA_ARCHIVE_SUMMARY = {
+    "49.02.01": ("Физическая культура", "18 мая – 28 июня 2026", 21),
+    "44.02.01": ("Дошкольное образование", "май – июнь 2026; точные даты — в программе", 42),
+    "44.02.02": ("Преподавание в начальных классах", "май – июнь 2026; точные даты — в программе", 43),
+    "44.02.03": ("Педагогика дополнительного образования", "май – июнь 2026; точные даты — в программе", 20),
+    "44.02.04": ("Специальное дошкольное образование", "май – июнь 2026; точные даты — в программе", 21),
+    "44.02.05": ("Коррекционная педагогика в начальном образовании", "май – июнь 2026; точные даты — в программе", 38),
+    "44.02.06": ("Профессиональное обучение (по отраслям)", "май – июнь 2026; точные даты — в программе", 18),
+    "39.02.01": ("Социальная работа", "май – июнь 2026; точные даты — в программе", 32),
 }
 
 
-async def show_education_menu(target, group_name):
+def _gia_archive_summary(group_name):
+    prefix = str(group_name or "").split("-", 1)[0].upper().strip()
+    code = SPECIALTY_CODES.get(prefix)
+    return (code, GIA_ARCHIVE_SUMMARY.get(code))
+
+
+async def show_education_menu(target, group_name, back_to="home"):
+    education_action = "education_schedule" if back_to == "schedule" else "education"
     buttons = [
-        [InlineKeyboardButton(text="📅 Календарный график 2026–2027", callback_data="edu|calendar")],
-        [InlineKeyboardButton(text="📘 Учебные планы 2026–2027", callback_data="edu|plans")],
-        [InlineKeyboardButton(text="🎓 Программы ГИА", callback_data="edu|gia")], [InlineKeyboardButton(text="🔗 Официальное расписание КузПК", url="https://kuzpc.kemobl.ru/studentu/raspisanie/")],
-        [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
+        [InlineKeyboardButton(text="📅 Календарный график 2026–2027", callback_data=f"edu|calendar|{back_to}")],
+        [InlineKeyboardButton(text="📘 Учебные планы 2026–2027", callback_data=f"edu|plans|{back_to}")],
+        [InlineKeyboardButton(text="🎓 Программы ГИА", callback_data=f"edu|gia|{back_to}")],
+        [InlineKeyboardButton(text="🗂️ Архив ГИА 2025–2026", callback_data=f"edu|gia_archive|{back_to}")],
+        [InlineKeyboardButton(text="🔗 Официальное расписание КузПК", url="https://kuzpc.kemobl.ru/studentu/raspisanie/")],
+        [InlineKeyboardButton(
+            text="↩️ К расписанию" if back_to == "schedule" else "🏠 Главное меню",
+            callback_data="menu|schedule" if back_to == "schedule" else "menu|home",
+        )],
     ]
     await safe_edit(target,
         f"🎓 <b>Образование · {escape(str(group_name))}</b>\n\n"
@@ -166,7 +201,10 @@ async def show_education_documents(c: CallbackQuery):
     if not user or not is_courses_group(group_name):
         await c.answer("Сначала выбери свою учебную группу.", show_alert=True)
         return
-    kind = c.data.split("|", 1)[1]
+    parts = c.data.split("|")
+    kind = parts[1] if len(parts) > 1 else ""
+    back_to = parts[2] if len(parts) > 2 and parts[2] in ("home", "schedule") else "home"
+    education_action = "education_schedule" if back_to == "schedule" else "education"
     if kind not in EDUCATION_TYPES:
         await c.answer("Этот раздел не найден.", show_alert=True)
         return
@@ -177,14 +215,14 @@ async def show_education_documents(c: CallbackQuery):
         await safe_edit(c.message,
             f"{icon} <b>{escape(title)}</b>\n\n{escape(str(error))}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="↩️ К разделам образования", callback_data="menu|education")],
+                [InlineKeyboardButton(text="↩️ К разделам образования", callback_data=f"menu|{education_action}")],
                 [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
             ]))
         await c.answer()
         return
     source_url = PLANS_URL if kind == "plans" else EDUCATION_URL
     buttons = [
-        [InlineKeyboardButton(text="↩️ К разделам образования", callback_data="menu|education")],
+        [InlineKeyboardButton(text="↩️ К разделам образования", callback_data=f"menu|{education_action}")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
     ]
     if documents:
@@ -197,6 +235,34 @@ async def show_education_documents(c: CallbackQuery):
                 "документы в этом разделе пока не опубликованы.\n\n"
                 "Можно посмотреть страницу-источник колледжа:")
         buttons.insert(0, [InlineKeyboardButton(text="🌐 Открыть страницу-источник", url=source_url)])
+    if kind == "gia_archive":
+        code, summary = _gia_archive_summary(group_name)
+        if summary:
+            specialty, dates, pages = summary
+            text = (
+                f"🗂️ <b>Архив ГИА · 2025–2026</b>\n"
+                f"Специальность: <b>{escape(specialty)}</b> · <code>{escape(code)}</code>\n\n"
+                "Вид ГИА: защита выпускной квалификационной работы (ВКР).\n"
+                f"Сроки по сводке: {escape(dates)}.\n"
+                f"Объём полной программы: {pages} стр.\n\n"
+            )
+            if documents:
+                text += "Прикрепляю архивную программу файлом."
+            elif code == "44.02.06":
+                text += "Полной программы этой специальности в присланном архиве нет."
+            else:
+                text += "Полный PDF пока не подключён к боту."
+            text += f"\nИсточник: <a href=\"{escape(EDUCATION_URL, quote=True)}\">раздел «Образование» КузПК</a>."
+        else:
+            text = (
+                f"🗂️ <b>Архив ГИА · 2025–2026</b>\n\n"
+                f"Для специальности группы <b>{escape(str(group_name))}</b> программа в сводке не найдена.\n"
+                f"Источник: <a href=\"{escape(EDUCATION_URL, quote=True)}\">раздел «Образование» КузПК</a>."
+            )
+        buttons = [
+            [InlineKeyboardButton(text="↩️ К разделам образования", callback_data=f"menu|{education_action}")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
+        ]
     await safe_edit(c.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await c.answer()
     for doc in documents[:50]:
@@ -210,6 +276,7 @@ async def show_education_documents(c: CallbackQuery):
                 parse_mode="HTML",
             )
         except EducationError as error:
+            logging.exception("Failed to download education document %r", doc.get("name"))
             await c.message.answer(
                 f"⚠️ Не удалось отправить «{escape(doc['name'])}». "
                 f"<a href=\"{escape(doc['url'], quote=True)}\">Открыть документ на сайте</a>.\n"
@@ -217,6 +284,19 @@ async def show_education_documents(c: CallbackQuery):
                 f"{escape(str(error))}",
                 parse_mode="HTML",
             )
+        except Exception:
+            # Telegram/network errors are different from download errors; still give
+            # the student a working link instead of silently failing the callback.
+            logging.exception("Failed to send education document %r", doc.get("name"))
+            try:
+                await c.message.answer(
+                    f"⚠️ Не получилось прикрепить файл «{escape(doc['name'])}» к сообщению.\n"
+                    f"<a href=\"{escape(doc['url'], quote=True)}\">Открыть и скачать документ</a> · "
+                    f"<a href=\"{escape(source_url, quote=True)}\">источник: КузПК</a>",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logging.exception("Failed to send education document fallback link")
 
 
 async def show_sports_sections(target):
@@ -419,6 +499,11 @@ async def management_action(c: CallbackQuery, state: FSMContext):
         if c.from_user.id != ADMIN_ID:
             await c.answer("Недостаточно прав.", show_alert=True); return
         await safe_edit(c.message, "👥 <b>Роли</b>\nКоманда: <code>/setrole TELEGRAM_ID student|starosta|teacher</code>", reply_markup=back_button("management"))
+    elif action == "stats":
+        if c.from_user.id != ADMIN_ID:
+            await c.answer("Недостаточно прав.", show_alert=True); return
+        count = len(await all_users())
+        await safe_edit(c.message, f"📊 <b>Статистика бота</b>\n\n👥 Зарегистрировано пользователей: <b>{count}</b>\n\nСчитаются аккаунты, которые запускали бота; администратор тоже включён.", reply_markup=back_button("management"))
     await c.answer()
 
 @dp.callback_query(F.data == "flow|cancel")
@@ -525,7 +610,7 @@ def schedule_keyboard(day: date, mode: str, page: int = 0):
         day_for_daily = day
     toggle = InlineKeyboardButton(text="📆 Неделя" if mode == "d" else "📅 По дням",
                                  callback_data=f"sc|{'w' if mode == 'd' else 'd'}|{week_anchor if mode == 'd' else day_for_daily:%Y%m%d}|0")
-    return InlineKeyboardMarkup(inline_keyboard=[nav, [toggle, InlineKeyboardButton(text="↩️ Назад", callback_data="menu|schedule")]])
+    return InlineKeyboardMarkup(inline_keyboard=[nav, [toggle, InlineKeyboardButton(text="↩️ Назад", callback_data="sc|back|0|0")]])
 
 async def render_schedule(target, uid: int, day: date, mode: str = "d", page: int = 0, edit: bool = False):
     u = await get_user(uid)
@@ -566,6 +651,9 @@ async def week(m: Message):
 async def schedule_navigation(c: CallbackQuery):
     _, mode, raw_day, raw_page = c.data.split("|")
     if mode == "noop":
+        await c.answer(); return
+    if mode == "back":
+        await safe_edit(c.message, "📅 <b>Расписание</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard())
         await c.answer(); return
     if mode == "x":
         await c.message.delete(); await c.answer(); return
@@ -618,6 +706,7 @@ async def management(m: Message):
         await m.answer("Недостаточно прав."); return
     buttons = [[InlineKeyboardButton(text="📣 Объявление группе", callback_data="manage|group")]]
     if m.from_user.id == ADMIN_ID:
+        buttons.append([InlineKeyboardButton(text="📊 Пользователи", callback_data="manage|stats")])
         buttons.append([InlineKeyboardButton(text="📢 Объявление всем", callback_data="manage|all")])
         buttons.append([InlineKeyboardButton(text="👥 Назначить роль", callback_data="manage|roles")])
     buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")])
@@ -699,6 +788,14 @@ async def setrole_cmd(m: Message):
     await set_role(target_id, parts[2])
     await m.answer(f"Роль пользователя {target_id} изменена на {parts[2]}.")
 
+@dp.message(Command("stats"))
+async def stats_cmd(m: Message):
+    if m.from_user.id != ADMIN_ID:
+        await m.answer("Эта команда доступна только администратору.")
+        return
+    count = len(await all_users())
+    await m.answer(f"📊 <b>Статистика бота</b>\n\n👥 Зарегистрировано пользователей: <b>{count}</b>\n\nСчитаются аккаунты, которые запускали бота; администратор тоже включён.")
+
 @dp.message(F.text == "👥 Назначить роль")
 async def role_help(m: Message):
     if m.from_user.id != ADMIN_ID:
@@ -713,7 +810,11 @@ async def back_menu(m: Message):
 
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
-    await m.answer("Команды:\n/start — регистрация или главное меню\n/help — помощь\n/setrole ID student|starosta|teacher — назначить роль (администратор)\n\nРасписание листается кнопками под сообщением. Объявления доступны в меню.")
+    commands = "Команды:\n/start — регистрация или главное меню\n/help — помощь\n"
+    if m.from_user.id == ADMIN_ID:
+        commands += "/stats — число зарегистрированных пользователей\n/setrole ID student|starosta|teacher — назначить роль\n"
+    commands += "\nРасписание листается кнопками под сообщением. Объявления доступны в меню."
+    await m.answer(commands)
 
 @dp.message(Command("cancel"))
 async def cancel(m: Message, state: FSMContext):

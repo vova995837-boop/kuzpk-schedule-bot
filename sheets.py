@@ -1,7 +1,8 @@
-import os, json, re
+import io, os, json, re, time, logging
 from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
+from drive_store import list_files as drive_files, download_file as drive_download
 
 SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "")
 CREDS = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "")
@@ -9,18 +10,89 @@ DEMO_GROUPS = [x.strip() for x in os.getenv("GROUPS", "2411").split(",") if x.st
 LOCAL_XLSX = os.getenv("SCHEDULE_XLSX", "Расписание_КузПК_09-14.11.2026.xlsx")
 TEACHERS_XLSX = os.getenv("SCHEDULE_TEACHERS_XLSX", "расписание_7.11_преподаватели.xlsx")
 GROUPS_XLSX = os.getenv("SCHEDULE_GROUPS_XLSX", "расписание_7.11_группы.xlsx")
+UNIFIED_XLSX = os.getenv("SCHEDULE_UNIFIED_XLSX", "Расписание_КузПК_единое_09-14.11.2026.xlsx")
 _NEW_SCHEDULE_CACHE = None
+_NEW_SCHEDULE_CACHE_TIME = 0.0
+
+def _drive_workbook(filename, view=None):
+    """Find and open a matching workbook in the configured Drive folder."""
+    try:
+        files = [f for f in drive_files() if f.get("name", "").lower().endswith((".xlsx", ".xlsm"))]
+        target = os.path.basename(filename).casefold()
+        match = next((f for f in files if f["name"].casefold() == target), None)
+        if not match and view == "group":
+            match = next((f for f in files if "групп" in f["name"].casefold()), None)
+        if not match and view == "teacher":
+            match = next((f for f in files if "преподавател" in f["name"].casefold()), None)
+        if not match:
+            return None
+        import openpyxl
+        return openpyxl.load_workbook(io.BytesIO(drive_download(match["id"])), read_only=True, data_only=True)
+    except Exception as exc:
+        logging.warning("Не удалось прочитать книгу из Google Drive: %s", exc)
+        return None
+
+def _unified_workbook():
+    """Load the consolidated schedule workbook, if it is present in Drive."""
+    try:
+        files = [f for f in drive_files() if f.get("name", "").lower().endswith((".xlsx", ".xlsm"))]
+        unified_files = [f for f in files if "единое" in f["name"].casefold()]
+        match = max(unified_files, key=lambda f: f.get("modifiedTime", ""), default=None)
+        import openpyxl
+        if match:
+            return openpyxl.load_workbook(io.BytesIO(drive_download(match["id"])), read_only=True, data_only=True)
+        candidates = [UNIFIED_XLSX] if os.path.isabs(UNIFIED_XLSX) else [
+            os.path.join(os.path.dirname(__file__), UNIFIED_XLSX),
+            os.path.join(os.path.expanduser("~/Downloads"), UNIFIED_XLSX),
+        ]
+        path = next((candidate for candidate in candidates if os.path.exists(candidate)), None)
+        return openpyxl.load_workbook(path, read_only=True, data_only=True) if path else None
+    except Exception as exc:
+        logging.warning("Не удалось прочитать единое расписание из Google Drive: %s", exc)
+        return None
+
+def _unified_rows(workbook):
+    """Convert the unified workbook's group sheet into the bot's schedule format."""
+    try:
+        ws = workbook["3. Расписание пар (группы)"]
+        result = []
+        for values in ws.iter_rows(min_row=4, values_only=True):
+            if not values or not values[0] or not values[4]:
+                continue
+            try:
+                raw_date = str(values[0]).strip()
+                schedule_date = datetime.strptime(raw_date, "%d.%m.%Y").date()
+            except (TypeError, ValueError):
+                continue
+            result.append({
+                "date": schedule_date.isoformat(), "group": str(values[4]).strip(),
+                "lesson_no": values[2], "lesson": str(values[3] or "").strip(),
+                "subject": str(values[5] or "").strip(), "teacher": str(values[6] or "").strip(),
+                "room": str(values[7] or "").strip(),
+            })
+        return _collapse_lessons(result)
+    except Exception as exc:
+        logging.warning("Не удалось обработать лист расписания групп: %s", exc)
+        return []
+
+def _open_workbook(filename, view=None):
+    """Prefer the shared Drive copy; fall back to the local XLSX file."""
+    import openpyxl
+    workbook = _drive_workbook(filename, view)
+    if workbook:
+        return workbook
+    path = filename if os.path.isabs(filename) else os.path.join(os.path.dirname(__file__), filename)
+    if not os.path.exists(path):
+        return None
+    return openpyxl.load_workbook(path, read_only=True, data_only=True)
 
 def _local_rows(tab):
     """Read the provided workbook when Google Sheets is not configured."""
-    path = LOCAL_XLSX
-    if not os.path.isabs(path):
-        path = os.path.join(os.path.dirname(__file__), path)
-    if not os.path.exists(path):
-        return []
     try:
-        import openpyxl
-        ws = openpyxl.load_workbook(path, read_only=True, data_only=True)[tab]
+        workbook = _open_workbook(LOCAL_XLSX)
+        if workbook is None:
+            return []
+        ws = workbook[tab]
         if tab == "Расписание пар":
             headers = [str(v or "").strip() for v in next(ws.iter_rows(min_row=4, max_row=4, values_only=True))]
             return [dict(zip(headers, row)) for row in ws.iter_rows(min_row=5, values_only=True) if row[0]]
@@ -80,16 +152,22 @@ def _collapse_lessons(rows):
 
 def _new_schedule_rows():
     """Convert the group and teacher weekly workbooks into schedule records."""
-    global _NEW_SCHEDULE_CACHE
-    if _NEW_SCHEDULE_CACHE is not None:
+    global _NEW_SCHEDULE_CACHE, _NEW_SCHEDULE_CACHE_TIME
+    if _NEW_SCHEDULE_CACHE is not None and time.monotonic() - _NEW_SCHEDULE_CACHE_TIME < 120:
         return _NEW_SCHEDULE_CACHE
     try:
-        import openpyxl
+        unified = _unified_workbook()
+        if unified is not None:
+            unified_rows = _unified_rows(unified)
+            if unified_rows:
+                _NEW_SCHEDULE_CACHE = unified_rows
+                _NEW_SCHEDULE_CACHE_TIME = time.monotonic()
+                return _NEW_SCHEDULE_CACHE
         group_output, teacher_output = [], []
         for filename, view in ((GROUPS_XLSX, "group"), (TEACHERS_XLSX, "teacher")):
-            path = filename if os.path.isabs(filename) else os.path.join(os.path.dirname(__file__), filename)
-            if not os.path.exists(path): continue
-            ws = openpyxl.load_workbook(path, read_only=True, data_only=True)["Текущее расписание"]
+            workbook = _open_workbook(filename, view)
+            if workbook is None: continue
+            ws = workbook["Текущее расписание"]
             raw = list(ws.iter_rows(values_only=True))
             # The date headers are on row 8, one per weekday block. Excel
             # exports them as e.g. "09.11.2026_x000D_\\nПОНЕДЕЛЬНИК".
@@ -137,11 +215,14 @@ def _new_schedule_rows():
                         (group_output if view == "group" else teacher_output).append(record)
         # The group workbook is the primary view; the teacher workbook fills
         # only group/periods absent from it, avoiding duplicate subgroup rows.
-        covered = {(r["group"], str(r["lesson_no"])) for r in group_output}
-        supplemental = [r for r in teacher_output if (r["group"], str(r["lesson_no"])) not in covered]
+        covered = {(r["group"], str(r["lesson_no"]), r["date"]) for r in group_output}
+        supplemental = [r for r in teacher_output
+                        if (r["group"], str(r["lesson_no"]), r["date"]) not in covered]
         _NEW_SCHEDULE_CACHE = _collapse_lessons(group_output + supplemental)
+        _NEW_SCHEDULE_CACHE_TIME = time.monotonic()
     except Exception:
         _NEW_SCHEDULE_CACHE = []
+        _NEW_SCHEDULE_CACHE_TIME = time.monotonic()
     return _NEW_SCHEDULE_CACHE
 
 async def _values(tab):
@@ -263,10 +344,32 @@ async def get_bells():
     return _local_bells()
 
 def _local_bells():
-    path = LOCAL_XLSX if os.path.isabs(LOCAL_XLSX) else os.path.join(os.path.dirname(__file__), LOCAL_XLSX)
-    if not os.path.exists(path): return []
     try:
         import openpyxl
+        workbook = _unified_workbook()
+        if workbook is not None:
+            ws = workbook["1. Расписание звонков"]
+            items = []
+            section = ""
+            for row in ws.iter_rows(min_row=3, values_only=True):
+                cells = [str(v).strip() if v is not None else "" for v in row]
+                first = cells[0] if cells else ""
+                if not first:
+                    continue
+                if first == "Смена":
+                    continue
+                if len(cells) > 1 and cells[1] and ("смена" in first.casefold()):
+                    items.append({"section": section, "shift": first, "lesson": cells[1],
+                                  "first": cells[2] if len(cells) > 2 else "",
+                                  "break_1": cells[3] if len(cells) > 3 else "",
+                                  "second": cells[4] if len(cells) > 4 else "",
+                                  "break_2": cells[5] if len(cells) > 5 else "",
+                                  "note": cells[6] if len(cells) > 6 else ""})
+                elif len(cells) > 1 and not cells[1]:
+                    section = first
+            return items
+        path = LOCAL_XLSX if os.path.isabs(LOCAL_XLSX) else os.path.join(os.path.dirname(__file__), LOCAL_XLSX)
+        if not os.path.exists(path): return []
         ws = openpyxl.load_workbook(path, read_only=True, data_only=True)["Расписание звонков"]
         section, items, notes = "", [], []
         for row in ws.iter_rows(min_row=4, values_only=True):
