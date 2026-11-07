@@ -46,21 +46,28 @@ def _collapse_lessons(rows):
         pair = str(row.get("lesson_no") or "").strip()
         group = str(row.get("group") or "").strip()
         pair_key = pair or str(row.get("lesson") or len(buckets))
-        key = (pair_key, group)
+        # A pair number repeats on every day; keep different dates separate.
+        key = (str(row.get("date") or "").strip(), pair_key, group)
         buckets.setdefault(key, []).append(row)
     merged = []
-    for (pair, _group), items in buckets.items():
+    for (_day, pair, _group), items in buckets.items():
         first = dict(items[0])
         lessons = sorted({int(str(r.get("lesson"))) for r in items
                           if str(r.get("lesson", "")).isdigit()})
         subjects, teachers, rooms = [], [], []
-        teacher_names = {str(r.get("teacher") or "").strip().casefold() for r in items}
         for r in items:
             subject = str(r.get("subject") or "").strip()
             teacher = str(r.get("teacher") or "").strip()
-            if subject and subject.casefold() not in teacher_names and subject not in subjects:
+            # Some source rows put the teacher's full name in both fields.
+            # Keep real subjects such as "Практика", which can also be used
+            # as a placeholder in the teacher row.
+            tokens = subject.replace("-", " ").split()
+            looks_like_person = (2 <= len(tokens) <= 3 and all(token[:1].isupper() for token in tokens))
+            repeated_person = subject.casefold() == teacher.casefold() and looks_like_person
+            if subject and not repeated_person and subject not in subjects:
                 subjects.append(subject)
-            if teacher and teacher not in teachers: teachers.append(teacher)
+            if teacher and teacher.casefold() != subject.casefold() and teacher not in teachers:
+                teachers.append(teacher)
             room = str(r.get("room") or "").strip()
             if room and room not in rooms: rooms.append(room)
         first["lesson_no"] = pair or first.get("lesson_no")
