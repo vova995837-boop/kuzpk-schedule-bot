@@ -23,6 +23,8 @@ async def init_db():
         if "college_selected" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN college_selected INTEGER NOT NULL DEFAULT 0")
             await db.execute("UPDATE users SET college_selected=1 WHERE group_name IS NOT NULL AND group_name!=''")
+        if "college_branch" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN college_branch TEXT")
         announcement_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(announcements)")).fetchall()}
         if "college_id" not in announcement_columns:
             await db.execute("ALTER TABLE announcements ADD COLUMN college_id TEXT NOT NULL DEFAULT 'kuzpk'")
@@ -49,6 +51,11 @@ async def set_group(uid, group):
 async def set_college(uid, college_id):
     async with aiosqlite.connect(_database_path()) as db:
         await db.execute("UPDATE users SET college_id=?, college_selected=1, group_name=NULL WHERE telegram_id=?", (college_id, uid))
+        await db.commit()
+
+async def set_college_branch(uid, branch):
+    async with aiosqlite.connect(_database_path()) as db:
+        await db.execute("UPDATE users SET college_branch=? WHERE telegram_id=?", (branch, uid))
         await db.commit()
 
 async def set_role(uid, role):

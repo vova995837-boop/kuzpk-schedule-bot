@@ -28,6 +28,7 @@ _TEACHERS_UNTIL = 0.0
 _TEACHER_ROWS = {}
 _GROUPS = {}
 _DEPARTMENT_DATA = {}
+_ENTITY_ROWS = {}
 CONVERTAPI_URL = "https://v2.convertapi.com/convert/pdf/to/xlsx"
 
 
@@ -97,6 +98,13 @@ def _parse_department_xlsx(xlsx_bytes, branch):
             continue
         headers = values[header_index]
         columns = []
+        specialty_row = values[header_index - 1] if header_index > 0 else ()
+        specialty_starts = []
+        for column_index in range(2, len(specialty_row)):
+            heading = _cell_text(specialty_row[column_index])
+            if (heading and heading.casefold() != "кабинет"
+                    and not re.match(r"^\d{2}\s*[А-ЯЁA-Z]", heading, re.IGNORECASE)):
+                specialty_starts.append((column_index, heading))
         for index in range(2, len(headers)):
             name = _cell_text(headers[index])
             # The department's table alternates a group column and its room.
@@ -106,29 +114,32 @@ def _parse_department_xlsx(xlsx_bytes, branch):
             # begin with the cohort's two-digit admission year.
             if not re.match(r"^\d{2}\s*[А-ЯЁA-Z]", name, re.IGNORECASE):
                 continue
-            key = (branch, name)
+            previous_specialties = [title for start_column, title in specialty_starts if start_column <= index]
+            specialty = previous_specialties[-1] if previous_specialties else "Специальность не указана"
+            key = (branch, specialty, name)
             if key not in seen:
-                groups.append({"name": name, "id": str(len(groups) + 1), "branch": branch})
+                groups.append({"name": name, "id": str(len(groups) + 1), "branch": branch,
+                               "specialty": specialty})
                 seen.add(key)
             room_col = index + 1 if index + 1 < len(headers) and _cell_text(headers[index + 1]).casefold() == "кабинет" else None
-            columns.append((index, room_col, name))
+            columns.append((index, room_col, name, specialty))
 
         current_date = None
-        last_subject = {index: "" for index, _room, _name in columns}
-        last_room = {index: "" for index, _room, _name in columns}
+        last_subject = {index: "" for index, _room, _name, _specialty in columns}
+        last_room = {index: "" for index, _room, _name, _specialty in columns}
         for row in values[header_index + 1:]:
             if not row:
                 continue
             row_date = _date_value(row[0] if len(row) else None)
             if row_date:
                 current_date = row_date
-                last_subject = {index: "" for index, _room, _name in columns}
-                last_room = {index: "" for index, _room, _name in columns}
+                last_subject = {index: "" for index, _room, _name, _specialty in columns}
+                last_room = {index: "" for index, _room, _name, _specialty in columns}
             if not current_date:
                 continue
             time_text = _cell_text(row[1] if len(row) > 1 else "")
             time_match = re.search(r"(\d{1,2}[.:]\d{2})\s*[-–]\s*(\d{1,2}[.:]\d{2})", time_text)
-            for index, room_col, group_name in columns:
+            for index, room_col, group_name, specialty in columns:
                 value = _cell_text(row[index] if len(row) > index else "")
                 room_value = _cell_text(row[room_col] if room_col is not None and len(row) > room_col else "")
                 if value and not _is_teacher(value):
@@ -142,6 +153,7 @@ def _parse_department_xlsx(xlsx_bytes, branch):
                     continue
                 records.append({
                     "date": current_date, "group": group_name,
+                    "specialty": specialty,
                     "lesson_no": len([r for r in records if r["date"] == current_date and r["group"] == group_name]) + 1,
                     "lesson": "", "subject": last_subject[index], "teacher": value,
                     "room": room_value or last_room[index],
@@ -218,7 +230,10 @@ def get_groups(branch="otp"):
         name = button.get("value", "").strip()
         group_id = button.get("id", "").strip()
         if name and group_id.isdigit():
-            groups.append({"name": name, "id": group_id, "branch": branch})
+            label = " ".join(button.get_text(" ", strip=True).split())
+            specialty = label[len(name):].strip() if label.startswith(name) else "Специальность не указана"
+            groups.append({"name": name, "id": group_id, "branch": branch,
+                           "specialty": specialty or "Специальность не указана"})
     _GROUPS[branch] = (time.monotonic() + _CACHE_TTL, groups)
     return list(groups)
 
@@ -313,7 +328,25 @@ def get_teacher_rows(name):
     return list(result)
 
 
-def get_entity_rows(kind, name):
-    if kind != "teacher":
+def get_entity_rows(kind, name, branch=None):
+    if kind == "teacher":
+        return get_teacher_rows(name)
+    if kind != "room":
         return []
-    return get_teacher_rows(name)
+    cache_key = f"room:{branch or 'all'}"
+    cached = _ENTITY_ROWS.get(cache_key)
+    if cached and cached[0] > time.monotonic():
+        return [row for row in cached[1] if not name or row.get("room") == name]
+    rows = []
+    for current_branch in ((branch,) if branch in DEPARTMENTS else ("osgp", "oenp", "otp", "osep")):
+        try:
+            if current_branch == "otp":
+                for group in get_groups(current_branch):
+                    rows.extend(get_group_schedule(group["name"], current_branch))
+            else:
+                _groups, branch_rows = _department_schedule(current_branch)
+                rows.extend(branch_rows)
+        except Exception:
+            logging.exception("Не удалось загрузить кабинеты ЯМК (%s)", current_branch)
+    _ENTITY_ROWS[cache_key] = (time.monotonic() + _CACHE_TTL, rows)
+    return [row for row in rows if not name or row.get("room") == name]

@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from db import init_db, add_user, get_user, set_group, set_college, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements
+from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_college_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
@@ -235,12 +235,12 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
         await safe_edit(c.message, format_bells(rows), reply_markup=back_button())
     elif action == "teachers":
         user = await get_user(c.from_user.id)
-        await show_entity_picker(c.message, "teacher", 0, edit=True, college_id=(user or {}).get("college_id", "kuzpk"))
+        await show_entity_picker(c.message, "teacher", 0, edit=True, college_id=(user or {}).get("college_id", "kuzpk"), college_branch=(user or {}).get("college_branch"))
     elif action == "rooms":
         user = await get_user(c.from_user.id)
         college_id = (user or {}).get("college_id", "kuzpk")
-        if college_id in ("pgt", "kuztagis"):
-            await show_entity_picker(c.message, "room", 0, edit=True, college_id=college_id)
+        if college_id in ("pgt", "kuztagis", "yamk"):
+            await show_entity_picker(c.message, "room", 0, edit=True, college_id=college_id, college_branch=(user or {}).get("college_branch"))
         else:
             await show_building_picker(c.message, edit=True, college_id=college_id)
     elif action == "announcements":
@@ -492,8 +492,8 @@ async def show_course_category(c: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await c.answer()
 
-async def show_entity_picker(target, kind: str, page: int, edit: bool = False, college_id="kuzpk"):
-    names = await get_entity_names(kind, college_id)
+async def show_entity_picker(target, kind: str, page: int, edit: bool = False, college_id="kuzpk", college_branch=None):
+    names = await get_entity_names(kind, college_id, college_branch)
     label = "преподавателя" if kind == "teacher" else "кабинет"
     if not names:
         text = f"Список {label}ов пуст."
@@ -524,18 +524,18 @@ async def entity_picker_page(c: CallbackQuery):
     _, kind, raw_page = c.data.split("|")
     if kind != "noop":
         user = await get_user(c.from_user.id)
-        await show_entity_picker(c.message, kind, int(raw_page), edit=True, college_id=(user or {}).get("college_id", "kuzpk"))
+        await show_entity_picker(c.message, kind, int(raw_page), edit=True, college_id=(user or {}).get("college_id", "kuzpk"), college_branch=(user or {}).get("college_branch"))
     await c.answer()
 
-async def render_entity_schedule(target, kind: str, index: int, day: date, edit: bool = True, college_id="kuzpk", nearest_if_empty=False):
-    names = await get_entity_names(kind, college_id)
+async def render_entity_schedule(target, kind: str, index: int, day: date, edit: bool = True, college_id="kuzpk", college_branch=None, nearest_if_empty=False):
+    names = await get_entity_names(kind, college_id, college_branch)
     if index < 0 or index >= len(names):
         await safe_edit(target, "Список изменился. Выбери запись ещё раз.", reply_markup=back_button())
         return
     name = names[index]
-    rows = await get_entity_schedule(kind, name, day, college_id)
+    rows = await get_entity_schedule(kind, name, day, college_id, college_branch)
     if nearest_if_empty and not rows and college_id in ("pgt", "kuztagis"):
-        available = await get_entity_schedule(kind, name, None, college_id)
+        available = await get_entity_schedule(kind, name, None, college_id, college_branch)
         dates = sorted({date.fromisoformat(str(row["date"])) for row in available if row.get("date")})
         if dates:
             upcoming = [schedule_day for schedule_day in dates if schedule_day >= day]
@@ -558,7 +558,7 @@ async def entity_schedule_navigation(c: CallbackQuery):
     _, kind, raw_index, raw_date = c.data.split("|")
     day = datetime.strptime(raw_date, "%Y%m%d").date()
     user = await get_user(c.from_user.id)
-    await render_entity_schedule(c.message, kind, int(raw_index), day, college_id=(user or {}).get("college_id", "kuzpk"))
+    await render_entity_schedule(c.message, kind, int(raw_index), day, college_id=(user or {}).get("college_id", "kuzpk"), college_branch=(user or {}).get("college_branch"))
     await c.answer()
 
 @dp.callback_query(F.data.startswith("entitystart|"))
@@ -566,7 +566,7 @@ async def entity_schedule_start(c: CallbackQuery):
     _, kind, raw_index, raw_date = c.data.split("|")
     day = datetime.strptime(raw_date, "%Y%m%d").date()
     user = await get_user(c.from_user.id)
-    await render_entity_schedule(c.message, kind, int(raw_index), day, college_id=(user or {}).get("college_id", "kuzpk"), nearest_if_empty=True)
+    await render_entity_schedule(c.message, kind, int(raw_index), day, college_id=(user or {}).get("college_id", "kuzpk"), college_branch=(user or {}).get("college_branch"), nearest_if_empty=True)
     await c.answer()
 
 def building_title(building):
@@ -927,12 +927,14 @@ async def yamk_action(c: CallbackQuery):
         role = "admin" if c.from_user.id == ADMIN_ID else (user["role"] if user else "student")
         await add_user(c.from_user.id, c.from_user.full_name, role)
         await set_college(c.from_user.id, "yamk")
+        await set_college_branch(c.from_user.id, branch)
         await set_group(c.from_user.id, group)
         await render_schedule(c.message, c.from_user.id, datetime.now(TZ).date(), edit=True)
         await c.answer()
         return
     if action == "teachers":
-        await show_entity_picker(c.message, "teacher", 0, edit=True, college_id="yamk")
+        user = await get_user(c.from_user.id)
+        await show_entity_picker(c.message, "teacher", 0, edit=True, college_id="yamk", college_branch=(user or {}).get("college_branch"))
         await c.answer()
         return
     await c.answer("Действие не найдено.", show_alert=True)
@@ -985,11 +987,11 @@ async def render_schedule(target, uid: int, day: date, mode: str = "d", page: in
         return
     if mode == "w":
         monday = day - timedelta(days=day.weekday())
-        schedule = await get_week_schedule(u["group_name"], monday, u.get("college_id", "kuzpk"))
+        schedule = await get_week_schedule(u["group_name"], monday, u.get("college_id", "kuzpk"), u.get("college_branch"))
         text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_week_schedule(u["group_name"], monday, schedule)
         markup = schedule_keyboard(monday, mode)
     else:
-        rows = await get_schedule(u["group_name"], day, u.get("college_id", "kuzpk"))
+        rows = await get_schedule(u["group_name"], day, u.get("college_id", "kuzpk"), u.get("college_branch"))
         text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_schedule(u["group_name"], day, rows)
         markup = schedule_keyboard(day, mode)
     if edit: await safe_edit(target, text, reply_markup=markup)

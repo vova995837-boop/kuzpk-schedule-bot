@@ -260,7 +260,7 @@ async def get_groups(college_id="kuzpk"):
     found.extend(str(r.get("group", "")).strip() for r in _new_schedule_rows() if r.get("group"))
     return sorted(set(found)) or DEMO_GROUPS
 
-async def get_schedule(group, day: date, college_id="kuzpk"):
+async def get_schedule(group, day: date, college_id="kuzpk", college_branch=None):
     if college_id == "pgt":
         from pgt import get_group_rows
         rows = await get_group_rows(group)
@@ -271,7 +271,7 @@ async def get_schedule(group, day: date, college_id="kuzpk"):
         return _collapse_lessons([r for r in rows if r.get("date") == day.isoformat() and r.get("group") == group])
     if college_id == "yamk":
         from yamk import get_group_schedule
-        rows = await asyncio.to_thread(get_group_schedule, group)
+        rows = await asyncio.to_thread(get_group_schedule, group, college_branch or "otp")
         return [r for r in rows if r.get("date") == day.isoformat()]
     new_rows = _new_schedule_rows()
     if new_rows:
@@ -296,7 +296,7 @@ async def get_schedule(group, day: date, college_id="kuzpk"):
     result.extend(r for r in _new_schedule_rows() if r["date"] == day.isoformat() and r["group"] == group)
     return _collapse_lessons(result)
 
-async def get_week_schedule(group, monday: date, college_id="kuzpk"):
+async def get_week_schedule(group, monday: date, college_id="kuzpk", college_branch=None):
     """Load one week's schedule in a single source read, indexed by date."""
     days = [monday + timedelta(days=offset) for offset in range(7)]
     by_day = {day: [] for day in days}
@@ -325,7 +325,7 @@ async def get_week_schedule(group, monday: date, college_id="kuzpk"):
         return {day: _collapse_lessons(day_rows) for day, day_rows in by_day.items()}
     if college_id == "yamk":
         from yamk import get_group_schedule
-        rows = await asyncio.to_thread(get_group_schedule, group)
+        rows = await asyncio.to_thread(get_group_schedule, group, college_branch or "otp")
         for row in rows:
             try:
                 row_day = date.fromisoformat(row["date"])
@@ -378,7 +378,7 @@ async def get_week_schedule(group, monday: date, college_id="kuzpk"):
             by_day[row_day].append(row)
     return {day: _collapse_lessons(day_rows) for day, day_rows in by_day.items()}
 
-async def get_teachers(college_id="kuzpk"):
+async def get_teachers(college_id="kuzpk", college_branch=None):
     if college_id == "pgt":
         from pgt import get_entity_names
         return [{"teacher": name} for name in await get_entity_names("teacher")]
@@ -400,7 +400,7 @@ async def get_teachers(college_id="kuzpk"):
     local += [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
               for r in _new_schedule_rows() if r.get("teacher")]
     return rows + local
-async def get_rooms(college_id="kuzpk"):
+async def get_rooms(college_id="kuzpk", college_branch=None):
     if college_id == "pgt":
         from pgt import get_entity_names
         return [{"room": name} for name in await get_entity_names("room")]
@@ -408,6 +408,10 @@ async def get_rooms(college_id="kuzpk"):
         from kuztagis import get_rows
         rows = await asyncio.to_thread(get_rows)
         return [{"room": room} for room in {r.get("room") for r in rows if r.get("room")}]
+    if college_id == "yamk":
+        from yamk import get_entity_rows
+        rows = await asyncio.to_thread(get_entity_rows, "room", "", college_branch)
+        return [{"room": room} for room in sorted({r.get("room") for r in rows if r.get("room")})]
     new_rows = _new_schedule_rows()
     if new_rows:
         return [{"room": room} for room in {r.get("room") for r in new_rows if r.get("room")}]
@@ -473,12 +477,12 @@ def _local_bells():
     except Exception:
         return []
 
-async def get_entity_names(kind, college_id="kuzpk"):
+async def get_entity_names(kind, college_id="kuzpk", college_branch=None):
     if kind == "teacher":
-        rows = await get_teachers(college_id)
+        rows = await get_teachers(college_id, college_branch)
         key = "teacher"
     else:
-        rows = await get_rooms(college_id)
+        rows = await get_rooms(college_id, college_branch)
         key = "room"
     names = {str(r.get(key, "")).strip() for r in rows if r.get(key)}
     if kind == "room" and college_id == "kuzpk":
@@ -493,7 +497,7 @@ def room_building(room):
         return int(value[0])
     return 0
 
-async def get_entity_schedule(kind, value, day: date | None, college_id="kuzpk"):
+async def get_entity_schedule(kind, value, day: date | None, college_id="kuzpk", college_branch=None):
     if college_id == "pgt":
         from pgt import get_entity_rows
         rows = await get_entity_rows(kind, value)
@@ -508,7 +512,7 @@ async def get_entity_schedule(kind, value, day: date | None, college_id="kuzpk")
         return _collapse_lessons(result)
     if college_id == "yamk":
         from yamk import get_entity_rows
-        rows = await asyncio.to_thread(get_entity_rows, kind, value)
+        rows = await asyncio.to_thread(get_entity_rows, kind, value, college_branch)
         return rows if day is None else [row for row in rows if row.get("date") == day.isoformat()]
     new_rows = _new_schedule_rows()
     if new_rows:
