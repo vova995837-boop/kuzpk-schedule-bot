@@ -2,6 +2,7 @@
 
 import logging
 import io
+import json
 import os
 import re
 import time
@@ -19,6 +20,7 @@ DEPARTMENTS = {
     "osep": ("ОСЭП", "Общественно-социально-экономический профиль"),
 }
 ACTIVITY_URL = "https://ymk.yanao.ru/activity/38207/"
+CACHE_FILE = os.path.join(os.path.dirname(__file__), "data", "yamk_cache.json")
 _SESSION = requests.Session()
 _SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
@@ -35,6 +37,8 @@ _DEPARTMENT_DATA = {}
 _ENTITY_ROWS = {}
 _PUBLIC_DOCUMENTS = None
 _PUBLIC_DOCUMENTS_UNTIL = 0.0
+_PUBLIC_DOCUMENTS_STALE = False
+_FALLBACK_CACHE = None
 _GROUP_RE = re.compile(r"(?<!\d)(\d{2}\s*[А-ЯЁA-Z]{1,8}(?:\s*/?\d+)?)", re.IGNORECASE)
 _TEACHER_RE = re.compile(r"(?<![А-ЯЁа-яё])([А-ЯЁ][А-ЯЁа-яё-]{1,})\s+([А-ЯЁ]\.\s*(?:[А-ЯЁ]\.)?)")
 _TIME_RE = re.compile(r"(\d{1,2})[.:](\d{2})\s*[-–]\s*(\d{1,2})[.:](\d{2})")
@@ -47,6 +51,18 @@ _MONTHS = {
 
 def _cell_text(value):
     return " ".join(str(value or "").replace("\xa0", " ").split()).strip()
+
+
+def _fallback_cache():
+    """Read the last committed schedule/doc snapshot when the college site is unreachable."""
+    global _FALLBACK_CACHE
+    if _FALLBACK_CACHE is None:
+        try:
+            with open(CACHE_FILE, encoding="utf-8") as cache_file:
+                _FALLBACK_CACHE = json.load(cache_file)
+        except (OSError, ValueError):
+            _FALLBACK_CACHE = {"branches": {}, "documents": []}
+    return _FALLBACK_CACHE
 
 
 def _date_value(value):
@@ -285,15 +301,30 @@ def _parse_department_pdf(pdf_bytes, branch):
 
 
 def _department_schedule(branch):
+    global _DEPARTMENT_DATA
     if branch not in DEPARTMENTS or branch == "otp":
         return [], []
     cached = _DEPARTMENT_DATA.get(branch)
     if cached and cached[0] > time.monotonic():
         return list(cached[1]), list(cached[2])
-    pdf_bytes, _filename = get_department_pdf(branch)
-    groups, rows = _parse_department_pdf(pdf_bytes, branch)
-    if not groups:
-        raise ValueError("Не удалось распознать группы в PDF расписания ЯМК")
+    if _PUBLIC_DOCUMENTS_STALE:
+        fallback = _fallback_cache().get("branches", {}).get(branch, {})
+        groups, rows = fallback.get("groups", []), fallback.get("rows", [])
+        if groups:
+            logging.warning("Используется сохранённое расписание ЯМК (%s): список сайта недоступен", branch)
+            _DEPARTMENT_DATA[branch] = (time.monotonic() + _CACHE_TTL, groups, rows)
+            return list(groups), list(rows)
+    try:
+        pdf_bytes, _filename = get_department_pdf(branch)
+        groups, rows = _parse_department_pdf(pdf_bytes, branch)
+        if not groups:
+            raise ValueError("Не удалось распознать группы в PDF расписания ЯМК")
+    except Exception:
+        fallback = _fallback_cache().get("branches", {}).get(branch, {})
+        groups, rows = fallback.get("groups", []), fallback.get("rows", [])
+        if not groups:
+            raise
+        logging.warning("Используется сохранённое расписание ЯМК (%s): сайт или PDF недоступен", branch)
     _DEPARTMENT_DATA[branch] = (time.monotonic() + _CACHE_TTL, groups, rows)
     return list(groups), list(rows)
 
@@ -327,33 +358,43 @@ def _public_document_category(title):
 
 def get_public_documents(refresh=False):
     """Read the college's public timetable and student-document listing."""
-    global _PUBLIC_DOCUMENTS, _PUBLIC_DOCUMENTS_UNTIL
+    global _PUBLIC_DOCUMENTS, _PUBLIC_DOCUMENTS_UNTIL, _PUBLIC_DOCUMENTS_STALE
     if not refresh and _PUBLIC_DOCUMENTS is not None and time.monotonic() < _PUBLIC_DOCUMENTS_UNTIL:
         return [dict(item) for item in _PUBLIC_DOCUMENTS]
 
     documents = []
-    for page_number in range(1, 4):
-        url = ACTIVITY_URL if page_number == 1 else f"{ACTIVITY_URL}?nav-documents=page-{page_number}"
-        response = _SESSION.get(url, timeout=30)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.content, "html.parser")
-        details = soup.select(".list__detail")
-        if not details:
-            break
-        for detail in details:
-            title_link = detail.select_one(".list__title a[href]")
-            file_link = detail.select_one("a.js-file-download[href]")
-            if not title_link or not file_link:
-                continue
-            title = _cell_text(title_link.get_text(" ", strip=True))
-            date_element = detail.select_one("time[datetime]")
-            documents.append({
-                "title": title,
-                "date": date_element.get("datetime", "") if date_element else "",
-                "category": _public_document_category(title),
-                "source_url": urljoin(ACTIVITY_URL, title_link.get("href", "")),
-                "file_url": urljoin(ACTIVITY_URL, file_link.get("href", "")),
-            })
+    fetched_live = True
+    try:
+        for page_number in range(1, 4):
+            url = ACTIVITY_URL if page_number == 1 else f"{ACTIVITY_URL}?nav-documents=page-{page_number}"
+            response = _SESSION.get(url, timeout=10)
+            response.raise_for_status()
+            soup = BeautifulSoup(response.content, "html.parser")
+            details = soup.select(".list__detail")
+            if not details:
+                break
+            for detail in details:
+                title_link = detail.select_one(".list__title a[href]")
+                file_link = detail.select_one("a.js-file-download[href]")
+                if not title_link or not file_link:
+                    continue
+                title = _cell_text(title_link.get_text(" ", strip=True))
+                date_element = detail.select_one("time[datetime]")
+                documents.append({
+                    "title": title,
+                    "date": date_element.get("datetime", "") if date_element else "",
+                    "category": _public_document_category(title),
+                    "source_url": urljoin(ACTIVITY_URL, title_link.get("href", "")),
+                    "file_url": urljoin(ACTIVITY_URL, file_link.get("href", "")),
+                })
+    except requests.RequestException:
+        logging.warning("Не удалось получить список документов ЯМК; используется сохранённый список", exc_info=True)
+        fetched_live = False
+        documents = _fallback_cache().get("documents", [])
+    if not documents:
+        fetched_live = False
+        documents = _fallback_cache().get("documents", [])
+    _PUBLIC_DOCUMENTS_STALE = not fetched_live
     _PUBLIC_DOCUMENTS = documents
     _PUBLIC_DOCUMENTS_UNTIL = time.monotonic() + _CACHE_TTL
     return [dict(item) for item in documents]
@@ -367,7 +408,7 @@ def download_public_document(index):
     response = _SESSION.get(document["file_url"], headers={
         "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
         "Referer": document["source_url"],
-    }, timeout=60)
+    }, timeout=15)
     response.raise_for_status()
     if not response.content.startswith(b"%PDF"):
         raise ValueError("Сайт ЯМК вернул файл не в формате PDF.")
@@ -392,7 +433,7 @@ def get_department_pdf(branch):
             response = _SESSION.get(document["file_url"], headers={
                 "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
                 "Referer": document["source_url"],
-            }, timeout=60)
+            }, timeout=15)
             response.raise_for_status()
             if not response.content.startswith(b"%PDF"):
                 raise ValueError("Сайт ЯМК вернул расписание не в формате PDF")
@@ -462,18 +503,24 @@ def get_groups(branch="otp"):
         groups, _rows = _department_schedule(branch)
         _GROUPS[branch] = (time.monotonic() + _CACHE_TTL, groups)
         return list(groups)
-    response = _SESSION.post(urljoin(BASE_URL, "student/list_group.php"), data={"branch": branch}, timeout=25)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
-    groups = []
-    for button in soup.select("button.group_box.open_modal"):
-        name = button.get("value", "").strip()
-        group_id = button.get("id", "").strip()
-        if name and group_id.isdigit():
-            label = " ".join(button.get_text(" ", strip=True).split())
-            specialty = label[len(name):].strip() if label.startswith(name) else "Специальность не указана"
-            groups.append({"name": name, "id": group_id, "branch": branch,
-                           "specialty": specialty or "Специальность не указана"})
+    try:
+        response = _SESSION.post(urljoin(BASE_URL, "student/list_group.php"), data={"branch": branch}, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        groups = []
+        for button in soup.select("button.group_box.open_modal"):
+            name = button.get("value", "").strip()
+            group_id = button.get("id", "").strip()
+            if name and group_id.isdigit():
+                label = " ".join(button.get_text(" ", strip=True).split())
+                specialty = label[len(name):].strip() if label.startswith(name) else "Специальность не указана"
+                groups.append({"name": name, "id": group_id, "branch": branch,
+                               "specialty": specialty or "Специальность не указана"})
+    except requests.RequestException:
+        logging.warning("Не удалось получить группы ЯМК (%s); используется сохранённый список", branch, exc_info=True)
+        groups = _fallback_cache().get("branches", {}).get(branch, {}).get("groups", [])
+    if not groups:
+        groups = _fallback_cache().get("branches", {}).get(branch, {}).get("groups", [])
     _GROUPS[branch] = (time.monotonic() + _CACHE_TTL, groups)
     return list(groups)
 
@@ -487,30 +534,37 @@ def get_group_schedule(group_name, branch="otp"):
     group = next((item for item in get_groups(branch) if item["name"] == group_name), None)
     if not group:
         return []
-    response = _SESSION.post(urljoin(BASE_URL, "student/schedule_group.php"), data={
-        "id_group": group["id"], "num_group": group["name"], "l_t_n": "this",
-        "depart": "otp", "id_depart": "4", "branch": "ОТП", "next": "last",
-    }, timeout=25)
-    response.raise_for_status()
-    soup = BeautifulSoup(response.text, "html.parser")
-    result = []
-    for table in soup.select(".rasp_stud_table table"):
-        day_text = " ".join(table.get_text(" ", strip=True).split())
-        match = re.search(r"(\d{2}\.\d{2}\.\d{4})", day_text)
-        if not match:
-            continue
-        try:
-            day = datetime.strptime(match.group(1), "%d.%m.%Y").date().isoformat()
-        except ValueError:
-            continue
-        for tr in table.select("tr"):
-            cells = [" ".join(cell.get_text(" ", strip=True).split()) for cell in tr.find_all(["td", "th"], recursive=False)]
-            if len(cells) < 5 or not cells[0].strip().isdigit():
+    try:
+        response = _SESSION.post(urljoin(BASE_URL, "student/schedule_group.php"), data={
+            "id_group": group["id"], "num_group": group["name"], "l_t_n": "this",
+            "depart": "otp", "id_depart": "4", "branch": "ОТП", "next": "last",
+        }, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        result = []
+        for table in soup.select(".rasp_stud_table table"):
+            day_text = " ".join(table.get_text(" ", strip=True).split())
+            match = re.search(r"(\d{2}\.\d{2}\.\d{4})", day_text)
+            if not match:
                 continue
-            start, end = _lesson_times(cells)
-            result.append({"date": day, "group": group_name, "lesson_no": cells[0], "lesson": cells[0],
-                           "subject": cells[1], "room": cells[2], "teacher": cells[3],
-                           "start": start, "end": end})
+            try:
+                day = datetime.strptime(match.group(1), "%d.%m.%Y").date().isoformat()
+            except ValueError:
+                continue
+            for tr in table.select("tr"):
+                cells = [" ".join(cell.get_text(" ", strip=True).split()) for cell in tr.find_all(["td", "th"], recursive=False)]
+                if len(cells) < 5 or not cells[0].strip().isdigit():
+                    continue
+                start, end = _lesson_times(cells)
+                result.append({"date": day, "group": group_name, "lesson_no": cells[0], "lesson": cells[0],
+                               "subject": cells[1], "room": cells[2], "teacher": cells[3],
+                               "start": start, "end": end})
+    except requests.RequestException:
+        logging.warning("Не удалось получить расписание ЯМК (%s); используется сохранённое расписание", group_name, exc_info=True)
+        result = []
+    if not result:
+        result = [row for row in _fallback_cache().get("branches", {}).get(branch, {}).get("rows", [])
+                  if row.get("group") == group_name]
     return result
 
 
