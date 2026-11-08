@@ -994,7 +994,18 @@ async def yamk_action(c: CallbackQuery):
             await c.message.answer_document(BufferedInputFile(data, filename=filename), caption=caption)
         except Exception:
             logging.exception("Не удалось отправить документ ЯМК")
-            await c.message.answer("Не удалось загрузить PDF с сайта ЯМК. Открой его по кнопке «Источник на сайте ЯМК».")
+            try:
+                from yamk import get_public_documents
+                documents = await asyncio.to_thread(get_public_documents)
+                document = documents[index]
+                await c.message.answer(
+                    f"Не получилось прикрепить PDF файлом. Открой его на сайте ЯМК:\n"
+                    f"<a href=\"{escape(document['file_url'], quote=True)}\">📄 Скачать PDF</a> · "
+                    f"<a href=\"{escape(document['source_url'], quote=True)}\">источник</a>"
+                )
+            except Exception:
+                logging.exception("Не удалось сформировать ссылку на документ ЯМК")
+                await c.message.answer("Не удалось загрузить PDF с сайта ЯМК. Вернись к списку документов и открой источник.")
         return
     if action == "department":
         branch = parts[2] if len(parts) > 2 else ""
