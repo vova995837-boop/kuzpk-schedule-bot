@@ -762,12 +762,11 @@ async def choose_city(c: CallbackQuery):
         await c.answer("Неизвестный город или регион.", show_alert=True)
         return
     labels = {"kuzbass": "Кузбасс", "yanao": "ЯНАО · Салехард", "kemerovo": "Кемерово", "prokopyevsk": "Прокопьевск"}
-    if city == "kemerovo":
-        city_key = "Кемерово"
-    elif city == "prokopyevsk":
-        city_key = "Прокопьевск"
-    else:
-        city_key = city
+    city_key = {
+        "kemerovo": "Кемерово",
+        "prokopyevsk": "Прокопьевск",
+        "yanao": "Салехард",
+    }.get(city, city)
     prompt = "Выбери город:" if city == "kuzbass" else "Выбери учебное заведение:"
     await safe_edit(c.message, f"🗺 <b>{labels[city]}</b>\n\n{prompt}", reply_markup=city_college_keyboard(city_key))
     await c.answer()
