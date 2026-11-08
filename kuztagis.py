@@ -8,10 +8,12 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 
 PUBLIC_URL = os.getenv("KUZTAGIS_YANDEX_PUBLIC_URL", "https://disk.yandex.ru/d/bbxOH6odZrMXrQ")
 API = "https://cloud-api.yandex.net/v1/disk/public/resources"
 _CACHE = {"until": 0, "rows": [], "bells": []}
+TEMP_WEEKLY_FILE = Path(__file__).with_name("11 неделя для студентов.xlsx")
 _DAYS = {
     "ПОНЕДЕЛЬНИК": "ПОНЕДЕЛЬНИК", "ВТОРНИК": "ВТОРНИК", "СРЕДА": "СРЕДА",
     "ЧЕТВЕРГ": "ЧЕТВЕРГ", "ПЯТНИЦА": "ПЯТНИЦА", "СУББОТА": "СУББОТА",
@@ -161,6 +163,11 @@ def _refresh():
         rows = []
         for schedule_date in set(weekly_rows_by_date) | set(daily_rows_by_date):
             rows.extend(weekly_rows_by_date.get(schedule_date, daily_rows_by_date.get(schedule_date, [])))
+        if TEMP_WEEKLY_FILE.exists():
+            temporary_rows = _parse_workbook(TEMP_WEEKLY_FILE.read_bytes(), TEMP_WEEKLY_FILE.name)
+            temporary_dates = {row["date"] for row in temporary_rows}
+            rows = [row for row in rows if row.get("date") not in temporary_dates]
+            rows.extend(temporary_rows)
         _CACHE.update(rows=rows, bells=bells, until=time.monotonic() + 900)
     except Exception as exc:
         logging.warning("Не удалось обновить расписание КузТАГиС с Яндекс Диска: %s", exc)
