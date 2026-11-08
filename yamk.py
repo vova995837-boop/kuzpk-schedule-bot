@@ -1,9 +1,7 @@
 """Public schedule reader for Yamalsky Multidisciplinary College (YAMK)."""
 
 import logging
-import base64
 import io
-import os
 import re
 import time
 from datetime import datetime
@@ -29,47 +27,18 @@ _TEACHER_ROWS = {}
 _GROUPS = {}
 _DEPARTMENT_DATA = {}
 _ENTITY_ROWS = {}
-CONVERTAPI_URL = "https://v2.convertapi.com/convert/pdf/to/xlsx"
-
-
-def _convert_pdf_to_xlsx(pdf_bytes, filename):
-    """Convert a public YAMK department PDF through ConvertAPI.
-
-    The API token is read only from the hosting environment and never logged.
-    ConvertAPI's default non-stored response keeps the converted workbook out
-    of its temporary file storage.
-    """
-    token = os.getenv("CONVERTAPI_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("Для расписаний PDF добавь секрет CONVERTAPI_TOKEN в Railway Variables")
-    response = _SESSION.post(
-        CONVERTAPI_URL,
-        headers={"Authorization": f"Bearer {token}"},
-        files={"File": (filename, pdf_bytes, "application/pdf")},
-        data={"StoreFile": "false", "OcrMode": "auto", "OcrLanguage": "ru"},
-        timeout=120,
-    )
-    response.raise_for_status()
-    payload = response.json()
-    converted = next((item for item in payload.get("Files", []) if item.get("FileData")), None)
-    if converted:
-        return base64.b64decode(converted["FileData"])
-    # Some account/API configurations return a short-lived download URL.
-    converted = next((item for item in payload.get("Files", []) if item.get("Url")), None)
-    if converted:
-        download = _SESSION.get(converted["Url"], timeout=60)
-        download.raise_for_status()
-        return download.content
-    raise ValueError("Сервис конвертации не вернул Excel-файл")
+_GROUP_RE = re.compile(r"(?<!\d)(\d{2}\s*[А-ЯЁA-Z]{1,8}(?:\s*/?\d+)?)", re.IGNORECASE)
+_TEACHER_RE = re.compile(r"(?<![А-ЯЁа-яё])([А-ЯЁ][А-ЯЁа-яё-]{1,})\s+([А-ЯЁ]\.\s*(?:[А-ЯЁ]\.)?)")
+_TIME_RE = re.compile(r"(\d{1,2})[.:](\d{2})\s*[-–]\s*(\d{1,2})[.:](\d{2})")
+_MONTHS = {
+    "января": 1, "февраля": 2, "марта": 3, "апреля": 4, "мая": 5,
+    "июня": 6, "июля": 7, "августа": 8, "сентября": 9,
+    "октября": 10, "ноября": 11, "декабря": 12,
+}
 
 
 def _cell_text(value):
     return " ".join(str(value or "").replace("\xa0", " ").split()).strip()
-
-
-def _is_teacher(value):
-    value = _cell_text(value)
-    return bool(re.search(r"[А-ЯЁ][а-яё-]+\s+[А-ЯЁ]\.?(?:\s*[А-ЯЁ]\.)?$", value))
 
 
 def _date_value(value):
@@ -82,85 +51,211 @@ def _date_value(value):
         return None
 
 
-def _parse_department_xlsx(xlsx_bytes, branch):
-    """Read group columns from a converted YAMK weekly schedule workbook."""
-    import openpyxl
+def _date_from_pdf_cell(value, year=None):
+    text = _cell_text(value)
+    if not text:
+        return None
+    compact = re.sub(r"\s+", "", text)
+    # OSEP writes dates backwards in its day header (for example 6202.11.20).
+    for token in re.findall(r"\d{4}\.\d{1,2}\.\d{1,2}", compact):
+        try:
+            return datetime.strptime(token[::-1], "%d.%m.%Y").date().isoformat()
+        except ValueError:
+            pass
+    # OENP's vertically merged date cell is ordered year, month, day.
+    match = re.search(r"(20\d{2})\D{0,4}(\d{1,2})\.(\d{1,2})\.?", compact)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3))).date().isoformat()
+        except ValueError:
+            pass
+    normal = _date_value(text)
+    if normal:
+        return normal
+    if year:
+        month_match = re.search(r"([А-ЯЁ]{4,})\s*/\s*(\d{1,2})", text, re.IGNORECASE)
+        if month_match:
+            month_name = month_match.group(1)[::-1].lower()
+            try:
+                month = _MONTHS[month_name]
+                day = int(month_match.group(2)[::-1])
+                return datetime(year, month, day).date().isoformat()
+            except (KeyError, ValueError):
+                pass
+    return None
 
-    workbook = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
-    groups, records = [], []
-    seen = set()
-    for sheet in workbook.worksheets:
-        values = list(sheet.iter_rows(values_only=True))
-        header_index = next((i for i, row in enumerate(values)
-                             if len(row) > 2 and _cell_text(row[0]).casefold() == "дни"
-                             and _cell_text(row[1]).casefold() == "время"), None)
-        if header_index is None:
-            continue
-        headers = values[header_index]
-        columns = []
-        specialty_row = values[header_index - 1] if header_index > 0 else ()
-        specialty_starts = []
-        for column_index in range(2, len(specialty_row)):
-            heading = _cell_text(specialty_row[column_index])
-            if (heading and heading.casefold() != "кабинет"
-                    and not re.match(r"^\d{2}\s*[А-ЯЁA-Z]", heading, re.IGNORECASE)):
-                specialty_starts.append((column_index, heading))
-        for index in range(2, len(headers)):
-            name = _cell_text(headers[index])
-            # The department's table alternates a group column and its room.
-            if not name or name.casefold() == "кабинет":
-                continue
-            # Exclude specialty titles and unrelated headings; group headings
-            # begin with the cohort's two-digit admission year.
-            if not re.match(r"^\d{2}\s*[А-ЯЁA-Z]", name, re.IGNORECASE):
-                continue
-            previous_specialties = [title for start_column, title in specialty_starts if start_column <= index]
-            specialty = previous_specialties[-1] if previous_specialties else "Специальность не указана"
-            key = (branch, specialty, name)
-            if key not in seen:
-                groups.append({"name": name, "id": str(len(groups) + 1), "branch": branch,
-                               "specialty": specialty})
-                seen.add(key)
-            room_col = index + 1 if index + 1 < len(headers) and _cell_text(headers[index + 1]).casefold() == "кабинет" else None
-            columns.append((index, room_col, name, specialty))
 
-        current_date = None
-        last_subject = {index: "" for index, _room, _name, _specialty in columns}
-        last_room = {index: "" for index, _room, _name, _specialty in columns}
-        for row in values[header_index + 1:]:
-            if not row:
-                continue
-            row_date = _date_value(row[0] if len(row) else None)
-            if row_date:
-                current_date = row_date
-                last_subject = {index: "" for index, _room, _name, _specialty in columns}
-                last_room = {index: "" for index, _room, _name, _specialty in columns}
-            if not current_date:
-                continue
-            time_text = _cell_text(row[1] if len(row) > 1 else "")
-            time_match = re.search(r"(\d{1,2}[.:]\d{2})\s*[-–]\s*(\d{1,2}[.:]\d{2})", time_text)
-            for index, room_col, group_name, specialty in columns:
-                value = _cell_text(row[index] if len(row) > index else "")
-                room_value = _cell_text(row[room_col] if room_col is not None and len(row) > room_col else "")
-                if value and not _is_teacher(value):
-                    # Subject/course rows are followed by a teacher row.
-                    if value.casefold() not in {"поднятие флага", "разговор о важном"}:
-                        last_subject[index] = value
-                    if room_value:
-                        last_room[index] = room_value
+def _pdf_week_start(text):
+    match = re.search(
+        r"(\d{1,2})\s+([А-ЯЁ]+)\s*(?:ПО|[-–])\s*\d{1,2}\s+([А-ЯЁ]+).*?(20\d{2})",
+        text.upper(), re.IGNORECASE,
+    )
+    if not match:
+        return None
+    month_name = match.group(2).lower()
+    month = _MONTHS.get(month_name)
+    if not month:
+        return None
+    try:
+        from datetime import date
+        return date(int(match.group(4)), month, int(match.group(1)))
+    except ValueError:
+        return None
+
+
+def _table_and_header(page, branch):
+    tables = page.extract_tables()
+    if not tables:
+        return None, None
+    table = max(tables, key=lambda value: max((len(row) for row in value), default=0))
+    for index, row in enumerate(table):
+        cells = [_cell_text(cell) for cell in row]
+        if branch == "osep":
+            if any("время" in cell.casefold() and "группа" in cell.casefold() for cell in cells):
+                return table, index
+        elif any(cell.casefold() == "время" for cell in cells) and sum(bool(_GROUP_RE.search(cell)) for cell in cells) >= 2:
+            return table, index
+    return None, None
+
+
+def _teacher_name(line):
+    match = _TEACHER_RE.search(line)
+    if not match:
+        return None, None
+    initials = re.sub(r"\s+", "", match.group(2))
+    return f"{match.group(1)} {initials}", match
+
+
+def _room_from_text(text):
+    match = re.search(r"\b\d{2,3}\s*[А-ЯЁA-Z]\b|АКТ\.?\s*З|КОНФ\.?\s*З|\bЗАЛ\b", text, re.IGNORECASE)
+    return _cell_text(match.group(0)) if match else ""
+
+
+def _parse_group_cell(value, room_value, state, current_date, group_name, specialty, time_text, records):
+    lines = [line.strip() for line in str(value or "").replace("\xa0", " ").splitlines() if line.strip()]
+    room_value = _cell_text(room_value)
+    if room_value and room_value.casefold() not in {"кабинет", "тенибак", "инд"}:
+        state["room"] = room_value
+    time_matches = list(_TIME_RE.finditer(time_text))
+    start = f"{time_matches[0].group(1)}:{time_matches[0].group(2)}" if time_matches else ""
+    end = f"{time_matches[-1].group(3)}:{time_matches[-1].group(4)}" if time_matches else ""
+    for line in lines:
+        line = _cell_text(line)
+        teachers = list(_TEACHER_RE.finditer(line))
+        if teachers:
+            subject = _cell_text(line[:teachers[0].start()]).strip(" -/;:")
+            if subject and subject.casefold() not in {"поднятие флага", "разговор о важном"}:
+                subject = re.sub(r"^\d+(?:\s*[-–]\s*\d+)?\s*[-–.]?\s*", "", subject)
+                state["subject"] = subject or state.get("subject", "")
+            tail = line[teachers[-1].end():]
+            room = room_value or _room_from_text(tail) or state.get("room", "")
+            for teacher_match in teachers:
+                initials = re.sub(r"\s+", "", teacher_match.group(2))
+                teacher = f"{teacher_match.group(1)} {initials}"
+                subject_text = state.get("subject", "")
+                if not current_date or not subject_text:
                     continue
-                if not value or not _is_teacher(value) or not last_subject[index]:
+                if subject_text.casefold() in {"поднятие флага", "разговор о важном"}:
                     continue
-                records.append({
-                    "date": current_date, "group": group_name,
-                    "specialty": specialty,
-                    "lesson_no": len([r for r in records if r["date"] == current_date and r["group"] == group_name]) + 1,
-                    "lesson": "", "subject": last_subject[index], "teacher": value,
-                    "room": room_value or last_room[index],
-                    "start": time_match.group(1).replace(".", ":") if time_match else "",
-                    "end": time_match.group(2).replace(".", ":") if time_match else "",
-                })
-    workbook.close()
+                lesson_no = sum(1 for row in records if row["date"] == current_date and row["group"] == group_name) + 1
+                records.append({"date": current_date, "group": group_name, "specialty": specialty,
+                                "lesson_no": lesson_no, "lesson": str(lesson_no), "subject": subject_text,
+                                "teacher": teacher, "room": room, "start": start, "end": end})
+        elif line.casefold() not in {"поднятие флага", "разговор о важном"}:
+            line = re.sub(r"^\d+(?:\s*[-–]\s*\d+)?\s*[-–.]?\s*", "", line)
+            if line and not re.fullmatch(r"\d{1,2}\s*\d{1,2}", line):
+                state["subject"] = line
+
+
+def _parse_department_pdf(pdf_bytes, branch):
+    """Extract searchable schedule tables directly from YAMK's weekly PDFs."""
+    import pdfplumber
+
+    groups, records, seen = [], [], set()
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as document:
+        document_text = "\n".join(page.extract_text() or "" for page in document.pages)
+        week_start = _pdf_week_start(document_text)
+        year_match = re.search(r"20\d{2}", document_text)
+        year = int(year_match.group(0)) if year_match else None
+        for page in document.pages:
+            table, header_index = _table_and_header(page, branch)
+            if table is None:
+                continue
+            headers = [_cell_text(cell) for cell in table[header_index]]
+            columns = []
+            if branch == "osep":
+                starts = []
+                for index, heading in enumerate(headers):
+                    if "преподаватель" not in heading.casefold():
+                        continue
+                    match = _GROUP_RE.search(heading)
+                    if match:
+                        starts.append((index, _cell_text(match.group(1))))
+                for group_pos, (start, group_name) in enumerate(starts):
+                    end = starts[group_pos + 1][0] if group_pos + 1 < len(starts) else len(headers)
+                    specialty = f"Отделение {DEPARTMENTS[branch][0]}"
+                    key = (branch, group_name)
+                    if key not in seen:
+                        groups.append({"name": group_name, "id": str(len(groups) + 1), "branch": branch,
+                                       "specialty": specialty})
+                        seen.add(key)
+                    columns.append((start, end, group_name, specialty))
+            else:
+                specialty_row = table[header_index - 1] if header_index else []
+                specialty_starts = []
+                for index, raw in enumerate(specialty_row):
+                    heading = _cell_text(raw)
+                    if heading and heading.casefold() not in {"кабинет", "тенибак"} and not _GROUP_RE.search(heading):
+                        specialty_starts.append((index, heading))
+                for index, name in enumerate(headers):
+                    match = _GROUP_RE.match(name)
+                    if not match:
+                        continue
+                    group_name = _cell_text(match.group(1))
+                    specialty = next((title for start_col, title in reversed(specialty_starts) if start_col <= index), DEPARTMENTS[branch][1])
+                    key = (branch, group_name)
+                    if key not in seen:
+                        groups.append({"name": group_name, "id": str(len(groups) + 1), "branch": branch,
+                                       "specialty": specialty})
+                        seen.add(key)
+                    room_col = index + 1 if index + 1 < len(headers) else None
+                    columns.append((index, room_col, group_name, specialty))
+
+            states = {column[0]: {"subject": "", "room": ""} for column in columns}
+            current_date = None
+            day_index = -1
+            for row in table[header_index + 1:]:
+                if not row:
+                    continue
+                date_cell = row[0] if row else ""
+                row_date = _date_from_pdf_cell(date_cell, year)
+                if row_date:
+                    current_date = row_date
+                    day_index = -1
+                    states = {column[0]: {"subject": "", "room": ""} for column in columns}
+                time_index = 2 if branch == "osep" else 1
+                time_text = _cell_text(row[time_index] if len(row) > time_index else "")
+                if branch == "osgp" and not row_date and week_start and re.match(r"^0?8[.:]", time_text):
+                    day_index += 1
+                    if day_index < 6:
+                        from datetime import timedelta
+                        current_date = (week_start + timedelta(days=day_index)).isoformat()
+                        states = {column[0]: {"subject": "", "room": ""} for column in columns}
+                if not current_date:
+                    continue
+                for column in columns:
+                    start_col, room_or_end, group_name, specialty = column
+                    if branch == "osep":
+                        end_col = room_or_end
+                        value = "\n".join(_cell_text(cell) for cell in row[start_col:end_col] if _cell_text(cell))
+                        room_value = next((_cell_text(cell) for cell in reversed(row[start_col:end_col])
+                                           if _room_from_text(_cell_text(cell))), "")
+                    else:
+                        room_col = room_or_end
+                        value = row[start_col] if len(row) > start_col else ""
+                        room_value = row[room_col] if room_col is not None and len(row) > room_col else ""
+                    _parse_group_cell(value, room_value, states[start_col], current_date,
+                                      group_name, specialty, time_text, records)
     return groups, records
 
 
@@ -170,9 +265,8 @@ def _department_schedule(branch):
     cached = _DEPARTMENT_DATA.get(branch)
     if cached and cached[0] > time.monotonic():
         return list(cached[1]), list(cached[2])
-    pdf_bytes, filename = get_department_pdf(branch)
-    xlsx_bytes = _convert_pdf_to_xlsx(pdf_bytes, filename)
-    groups, rows = _parse_department_xlsx(xlsx_bytes, branch)
+    pdf_bytes, _filename = get_department_pdf(branch)
+    groups, rows = _parse_department_pdf(pdf_bytes, branch)
     if not groups:
         raise ValueError("В Excel после конвертации не удалось распознать столбцы групп")
     _DEPARTMENT_DATA[branch] = (time.monotonic() + _CACHE_TTL, groups, rows)
