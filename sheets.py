@@ -245,8 +245,11 @@ async def get_groups(college_id="kuzpk"):
         return sorted({r["group"] for r in rows if r.get("group")})
     if college_id == "yamk":
         from yamk import get_groups as yamk_groups
-        groups = await asyncio.to_thread(yamk_groups, "otp")
-        return sorted({r["name"] for r in groups})
+        result = []
+        for branch in ("osgp", "oenp", "otp", "osep"):
+            groups = await asyncio.to_thread(yamk_groups, branch)
+            result.extend(r["name"] for r in groups)
+        return sorted(set(result))
     new_rows = _new_schedule_rows()
     if new_rows:
         return sorted({str(r["group"]).strip() for r in new_rows if r.get("group")})

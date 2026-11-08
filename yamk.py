@@ -55,7 +55,12 @@ def get_department_pdf(branch):
 
 
 def get_groups(branch="otp"):
-    if branch != "otp":
+    """Return groups the official site exposes as individually selectable.
+
+    The other three department pages currently publish only a department-wide
+    PDF. Do not infer group names from a PDF or expose fake per-group menus.
+    """
+    if branch not in DEPARTMENTS:
         return []
     cached = _GROUPS.get(branch)
     if cached and cached[0] > time.monotonic():

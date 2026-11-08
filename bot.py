@@ -826,32 +826,25 @@ async def yamk_action(c: CallbackQuery):
         return
     if action == "department":
         branch = parts[2] if len(parts) > 2 else ""
-        from yamk import DEPARTMENTS, get_department_pdf
+        from yamk import DEPARTMENTS, get_groups as yamk_groups
         if branch not in DEPARTMENTS:
             await c.answer("Такое отделение не найдено.", show_alert=True)
             return
-        if branch == "otp":
+        groups = await asyncio.to_thread(yamk_groups, branch)
+        if groups:
             await show_yamk_groups(c.message)
             await c.answer()
             return
         label, description = DEPARTMENTS[branch]
         await safe_edit(c.message,
-            f"📚 <b>{label} · ЯМК</b>\n<i>{escape(description)}</i>\n\nЗагружаю актуальное расписание с сайта колледжа…",
+            f"📚 <b>{label} · ЯМК</b>\n<i>{escape(description)}</i>\n\n"
+            "На сайте колледжа для этого отделения сейчас опубликовано общее расписание, "
+            "без списка групп для отдельного выбора. Я не буду отправлять общий PDF вместо расписания группы.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📚 Группы ОТП", callback_data="yamk|groups|0")],
+                [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://www.ямк-салехард.рф/")],
                 [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
             ]))
-        try:
-            content, filename = await asyncio.to_thread(get_department_pdf, branch)
-            await c.message.answer_document(
-                BufferedInputFile(content, filename=filename),
-                caption=f"📚 <b>{label} · ЯМК</b>\nИсточник: <a href=\"https://www.ямк-салехард.рф/\">официальное расписание колледжа</a>",
-                reply_markup=yamk_menu_keyboard(), parse_mode="HTML")
-        except Exception as error:
-            logging.exception("Не удалось загрузить расписание ЯМК (%s)", branch)
-            await c.message.answer(
-                f"Не получилось загрузить PDF сейчас. Открой расписание на сайте: "
-                f"<a href=\"https://www.ямк-салехард.рф/\">ЯМК · {label}</a>\n{escape(str(error))}",
-                reply_markup=yamk_menu_keyboard(), parse_mode="HTML")
         await c.answer()
         return
     if action == "groups":
@@ -864,7 +857,19 @@ async def yamk_action(c: CallbackQuery):
         return
     if action == "group":
         group = parts[2] if len(parts) > 2 else ""
-        from yamk import get_group_schedule
+        from yamk import get_group_schedule, get_groups as yamk_groups
+        # Resolve the selected group against all official group lists rather
+        # than accepting arbitrary callback text.
+        valid = []
+        for branch in ("osgp", "oenp", "otp", "osep"):
+            valid.extend(await asyncio.to_thread(yamk_groups, branch))
+        selected = next((item for item in valid if item["name"] == group), None)
+        if not selected:
+            await c.answer("Группа не найдена в актуальном списке ЯМК.", show_alert=True)
+            return
+        if selected.get("branch", "otp") != "otp":
+            await c.answer("Сайт пока не даёт расписание этой группы отдельно.", show_alert=True)
+            return
         try:
             rows = await asyncio.to_thread(get_group_schedule, group)
         except Exception:
