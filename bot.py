@@ -168,7 +168,8 @@ def yamk_menu_keyboard():
             for key, (label, _description) in DEPARTMENTS.items()]
     rows += [
         [InlineKeyboardButton(text="👨‍🏫 Преподаватели", callback_data="yamk|teachers")],
-        [InlineKeyboardButton(text="🌐 Расписание на сайте ЯМК", url="https://www.ямк-салехард.рф/")],
+        [InlineKeyboardButton(text="📄 Расписания и документы", callback_data="yamk|docs")],
+        [InlineKeyboardButton(text="🌐 Расписание и документы ЯМК", url="https://ymk.yanao.ru/activity/38207/")],
         [InlineKeyboardButton(text="🏙 Сменить регион или колледж", callback_data="menu|college")],
     ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -825,7 +826,7 @@ async def show_yamk_specialties(target, branch="otp"):
         await safe_edit(target,
             f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · ЯМК</b>\n\n{escape(message)}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://www.ямк-салехард.рф/")],
+                [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://ymk.yanao.ru/activity/38207/")],
                 [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
             ]))
         return
@@ -833,7 +834,7 @@ async def show_yamk_specialties(target, branch="otp"):
         await safe_edit(target,
             f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · группы</b>\n\nНа сайте ЯМК сейчас не удалось загрузить список групп.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://www.ямк-салехард.рф/")],
+                [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://ymk.yanao.ru/activity/38207/")],
                 [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
             ]))
         return
@@ -844,7 +845,7 @@ async def show_yamk_specialties(target, branch="otp"):
         for index, specialty in enumerate(specialties)]
     rows += [
         [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
-        [InlineKeyboardButton(text="🌐 Сайт ЯМК", url="https://www.ямк-салехард.рф/")],
+        [InlineKeyboardButton(text="🌐 Сайт ЯМК", url="https://ymk.yanao.ru/activity/38207/")],
     ]
     await safe_edit(target,
         f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · специальности</b>\n\n"
@@ -879,11 +880,83 @@ async def show_yamk_groups(target, branch="otp", specialty_index=0, page=0):
         nav.append(InlineKeyboardButton(text="›", callback_data=f"yamk|groups|{branch}|{specialty_index}|{page+1}"))
     rows.extend([nav,
         [InlineKeyboardButton(text="↩️ Специальности", callback_data=f"yamk|department|{branch}")],
-        [InlineKeyboardButton(text="🌐 Сайт ЯМК", url="https://www.ямк-салехард.рф/")],
+        [InlineKeyboardButton(text="🌐 Сайт ЯМК", url="https://ymk.yanao.ru/activity/38207/")],
     ])
     await safe_edit(target,
         f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · {escape(specialty)}</b>\n\n"
         f"Выбери группу · всего {len(groups)}:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+YAMK_DOCUMENT_CATEGORIES = {
+    "schedules": "📅 Расписания отделений",
+    "debts": "📌 Задолженности",
+    "sessions": "🗓 Сессии",
+    "attestation": "📝 Аттестация и экзамены",
+    "extra": "🎨 Дополнительное образование",
+    "other": "📎 Другие документы",
+}
+
+
+async def show_yamk_documents(target, category=None):
+    from yamk import get_public_documents
+    try:
+        documents = await asyncio.to_thread(get_public_documents)
+    except Exception:
+        logging.exception("Не удалось загрузить документы с сайта ЯМК")
+        await safe_edit(target,
+            "📄 <b>Документы ЯМК</b>\n\nНе удалось загрузить список документов. Попробуй позже или открой страницу ЯМК:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Открыть расписания и документы", url="https://ymk.yanao.ru/activity/38207/")],
+                [InlineKeyboardButton(text="↩️ Назад к ЯМК", callback_data="menu|home")],
+            ]))
+        return
+
+    if category is None:
+        rows = []
+        for key, label in YAMK_DOCUMENT_CATEGORIES.items():
+            count = sum(item["category"] == key for item in documents)
+            if count:
+                rows.append([InlineKeyboardButton(text=f"{label} · {count}", callback_data=f"yamk|docs|{key}")])
+        rows += [
+            [InlineKeyboardButton(text="🌐 Открыть источник ЯМК", url="https://ymk.yanao.ru/activity/38207/")],
+            [InlineKeyboardButton(text="↩️ Назад к ЯМК", callback_data="menu|home")],
+        ]
+        await safe_edit(target,
+            "📄 <b>Расписания и документы ЯМК</b>\n\nВыбери, что открыть:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        return
+
+    selected = [(index, item) for index, item in enumerate(documents) if item["category"] == category]
+    if not selected:
+        await safe_edit(target,
+            f"📄 <b>{YAMK_DOCUMENT_CATEGORIES.get(category, 'Документы ЯМК')}</b>\n\nНа сайте пока нет документов в этом разделе.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="↩️ Разделы документов", callback_data="yamk|docs")],
+                [InlineKeyboardButton(text="↩️ Назад к ЯМК", callback_data="menu|home")],
+            ]))
+        return
+
+    rows = []
+    details = []
+    for index, item in selected:
+        title = item["title"]
+        date_label = item.get("date", "")
+        if date_label:
+            try:
+                date_label = datetime.strptime(date_label, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except ValueError:
+                pass
+        details.append(f"<b>{escape(date_label)}</b>\n{escape(title)}" if date_label else escape(title))
+        short_title = title if len(title) <= 42 else title[:39].rstrip() + "…"
+        rows.append([InlineKeyboardButton(text=f"📎 Скачать · {short_title}", callback_data=f"yamk|doc|{index}")])
+        rows.append([InlineKeyboardButton(text="🌐 Источник на сайте ЯМК", url=item["source_url"])])
+    rows += [
+        [InlineKeyboardButton(text="↩️ Разделы документов", callback_data="yamk|docs")],
+        [InlineKeyboardButton(text="↩️ Назад к ЯМК", callback_data="menu|home")],
+    ]
+    await safe_edit(target,
+        f"📄 <b>{YAMK_DOCUMENT_CATEGORIES.get(category, 'Документы ЯМК')}</b>\n\n" + "\n\n".join(details),
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
@@ -893,6 +966,35 @@ async def yamk_action(c: CallbackQuery):
     action = parts[1] if len(parts) > 1 else ""
     if action == "noop":
         await c.answer()
+        return
+    if action == "docs":
+        category = parts[2] if len(parts) > 2 else None
+        if category is not None and category not in YAMK_DOCUMENT_CATEGORIES:
+            await c.answer("Такой раздел документов не найден.", show_alert=True)
+            return
+        await show_yamk_documents(c.message, category)
+        await c.answer()
+        return
+    if action == "doc":
+        try:
+            index = int(parts[2])
+            from yamk import download_public_document
+            await c.answer("Загружаю PDF…")
+            document, data, filename = await asyncio.to_thread(download_public_document, index)
+            date_label = document.get("date", "")
+            if date_label:
+                try:
+                    date_label = datetime.strptime(date_label, "%Y-%m-%d").strftime("%d.%m.%Y")
+                except ValueError:
+                    pass
+            caption = f"📄 <b>{escape(document['title'])}</b>"
+            if date_label:
+                caption += f"\nДата документа: {escape(date_label)}"
+            caption += f"\nИсточник: <a href=\"{escape(document['source_url'], quote=True)}\">страница ЯМК</a>"
+            await c.message.answer_document(BufferedInputFile(data, filename=filename), caption=caption)
+        except Exception:
+            logging.exception("Не удалось отправить документ ЯМК")
+            await c.message.answer("Не удалось загрузить PDF с сайта ЯМК. Открой его по кнопке «Источник на сайте ЯМК».")
         return
     if action == "department":
         branch = parts[2] if len(parts) > 2 else ""

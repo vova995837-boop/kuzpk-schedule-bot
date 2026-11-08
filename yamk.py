@@ -2,10 +2,11 @@
 
 import logging
 import io
+import os
 import re
 import time
 from datetime import datetime
-from urllib.parse import parse_qs, urljoin, urlparse
+from urllib.parse import parse_qs, unquote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -17,9 +18,14 @@ DEPARTMENTS = {
     "otp": ("ОТП", "Отделение технического профиля"),
     "osep": ("ОСЭП", "Общественно-социально-экономический профиль"),
 }
-SOURCE_URL = "https://www.ямк-салехард.рф/"
+ACTIVITY_URL = "https://ymk.yanao.ru/activity/38207/"
 _SESSION = requests.Session()
-_SESSION.headers.update({"User-Agent": "KuzbassCollegeScheduleBot/1.0"})
+_SESSION.headers.update({
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://ymk.yanao.ru/",
+})
 _CACHE_TTL = 300
 _TEACHERS = None
 _TEACHERS_UNTIL = 0.0
@@ -27,6 +33,8 @@ _TEACHER_ROWS = {}
 _GROUPS = {}
 _DEPARTMENT_DATA = {}
 _ENTITY_ROWS = {}
+_PUBLIC_DOCUMENTS = None
+_PUBLIC_DOCUMENTS_UNTIL = 0.0
 _GROUP_RE = re.compile(r"(?<!\d)(\d{2}\s*[А-ЯЁA-Z]{1,8}(?:\s*/?\d+)?)", re.IGNORECASE)
 _TEACHER_RE = re.compile(r"(?<![А-ЯЁа-яё])([А-ЯЁ][А-ЯЁа-яё-]{1,})\s+([А-ЯЁ]\.\s*(?:[А-ЯЁ]\.)?)")
 _TIME_RE = re.compile(r"(\d{1,2})[.:](\d{2})\s*[-–]\s*(\d{1,2})[.:](\d{2})")
@@ -302,9 +310,96 @@ def _get(path):
     return BeautifulSoup(response.text, "html.parser")
 
 
+def _public_document_category(title):
+    text = title.casefold()
+    if "задолж" in text or "долг" in text:
+        return "debts"
+    if "сесс" in text:
+        return "sessions"
+    if "дополнительного образования" in text or "круж" in text or "студи" in text:
+        return "extra"
+    if "аттестаци" in text or "экзамен" in text or "гиа" in text:
+        return "attestation"
+    if "расписание занятий" in text:
+        return "schedules"
+    return "other"
+
+
+def get_public_documents(refresh=False):
+    """Read the college's public timetable and student-document listing."""
+    global _PUBLIC_DOCUMENTS, _PUBLIC_DOCUMENTS_UNTIL
+    if not refresh and _PUBLIC_DOCUMENTS is not None and time.monotonic() < _PUBLIC_DOCUMENTS_UNTIL:
+        return [dict(item) for item in _PUBLIC_DOCUMENTS]
+
+    documents = []
+    for page_number in range(1, 4):
+        url = ACTIVITY_URL if page_number == 1 else f"{ACTIVITY_URL}?nav-documents=page-{page_number}"
+        response = _SESSION.get(url, timeout=30)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.content, "html.parser")
+        details = soup.select(".list__detail")
+        if not details:
+            break
+        for detail in details:
+            title_link = detail.select_one(".list__title a[href]")
+            file_link = detail.select_one("a.js-file-download[href]")
+            if not title_link or not file_link:
+                continue
+            title = _cell_text(title_link.get_text(" ", strip=True))
+            date_element = detail.select_one("time[datetime]")
+            documents.append({
+                "title": title,
+                "date": date_element.get("datetime", "") if date_element else "",
+                "category": _public_document_category(title),
+                "source_url": urljoin(ACTIVITY_URL, title_link.get("href", "")),
+                "file_url": urljoin(ACTIVITY_URL, file_link.get("href", "")),
+            })
+    _PUBLIC_DOCUMENTS = documents
+    _PUBLIC_DOCUMENTS_UNTIL = time.monotonic() + _CACHE_TTL
+    return [dict(item) for item in documents]
+
+
+def download_public_document(index):
+    documents = get_public_documents()
+    if index < 0 or index >= len(documents):
+        raise ValueError("Документ уже обновился на сайте. Открой список документов заново.")
+    document = documents[index]
+    response = _SESSION.get(document["file_url"], headers={
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Referer": document["source_url"],
+    }, timeout=60)
+    response.raise_for_status()
+    if not response.content.startswith(b"%PDF"):
+        raise ValueError("Сайт ЯМК вернул файл не в формате PDF.")
+    if len(response.content) > 48 * 1024 * 1024:
+        raise ValueError("PDF слишком большой для отправки через Telegram.")
+    filename = os.path.basename(unquote(urlparse(document["file_url"]).path)) or "document.pdf"
+    return document, response.content, filename
+
+
 def get_department_pdf(branch):
     if branch not in DEPARTMENTS or branch == "otp":
         raise ValueError("Для этого отделения PDF не используется")
+    department_titles = {
+        "osgp": "социально-гуманитарного профиля",
+        "oenp": "естественнонаучного профиля",
+        "osep": "социально-экономического профиля",
+    }
+    keyword = department_titles[branch]
+    for document in get_public_documents():
+        title = document["title"].casefold()
+        if document["category"] == "schedules" and keyword in title:
+            response = _SESSION.get(document["file_url"], headers={
+                "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+                "Referer": document["source_url"],
+            }, timeout=60)
+            response.raise_for_status()
+            if not response.content.startswith(b"%PDF"):
+                raise ValueError("Сайт ЯМК вернул расписание не в формате PDF")
+            return response.content, os.path.basename(unquote(urlparse(document["file_url"]).path))
+
+    # Compatibility fallback for the older timetable site if the official
+    # document index is temporarily unavailable or does not list this profile.
     from datetime import date
     from zoneinfo import ZoneInfo
 
@@ -357,11 +452,7 @@ def get_department_pdf(branch):
 
 
 def get_groups(branch="otp"):
-    """Return groups the official site exposes as individually selectable.
-
-    The other three department pages currently publish only a department-wide
-    PDF. Do not infer group names from a PDF or expose fake per-group menus.
-    """
+    """Return group names parsed from the current department timetable."""
     if branch not in DEPARTMENTS:
         return []
     cached = _GROUPS.get(branch)
