@@ -124,8 +124,9 @@ def schedule_menu_keyboard(college_id="kuzpk"):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-COLLEGES = {"kuzpk": "КузПК", "kuztagis": "КузТАГиС", "pgt": "ПГТ им. В. П. Романова"}
-COLLEGE_CITIES = {"kuzpk": "Кемерово", "kuztagis": "Кемерово", "pgt": "Прокопьевск"}
+COLLEGES = {"kuzpk": "КузПК", "kuztagis": "КузТАГиС", "pgt": "ПГТ им. В. П. Романова", "yamk": "ЯМК"}
+COLLEGE_CITIES = {"kuzpk": "Кемерово", "kuztagis": "Кемерово", "pgt": "Прокопьевск", "yamk": "Салехард"}
+COLLEGE_REGIONS = {"kuzpk": "kuzbass", "kuztagis": "kuzbass", "pgt": "kuzbass", "yamk": "yanao"}
 
 def college_label(college_id):
     return f"{COLLEGES.get(college_id, 'КузПК')} · {COLLEGE_CITIES.get(college_id, 'Кемерово')}"
@@ -135,24 +136,35 @@ def college_keyboard():
         [InlineKeyboardButton(text="🎓 КузПК · Кемерово", callback_data="college|kuzpk")],
         [InlineKeyboardButton(text="🏫 КузТАГиС · Кемерово", callback_data="college|kuztagis")],
         [InlineKeyboardButton(text="🏢 ПГТ им. В. П. Романова · Прокопьевск", callback_data="college|pgt")],
+        [InlineKeyboardButton(text="🏫 ЯМК · Салехард", callback_data="college|yamk")],
         [InlineKeyboardButton(text="↩️ Главное меню", callback_data="menu|home")],
     ])
 
 def city_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🏙 Кемерово", callback_data="city|kemerovo")],
-        [InlineKeyboardButton(text="🏙 Прокопьевск", callback_data="city|prokopyevsk")],
+        [InlineKeyboardButton(text="⛏ Кузбасс · Кемерово и Прокопьевск", callback_data="city|kuzbass")],
+        [InlineKeyboardButton(text="❄️ ЯНАО · Салехард", callback_data="city|yanao")],
     ])
 
 def colleges_in_city(city):
-    city_ids = {"kemerovo": "Кемерово", "prokopyevsk": "Прокопьевск"}
-    label = city_ids.get(city)
-    return [key for key, value in COLLEGE_CITIES.items() if value == label]
+    return [key for key, value in COLLEGE_REGIONS.items() if value == city]
 
 def city_college_keyboard(city):
-    rows = [[InlineKeyboardButton(text=f"🎓 {COLLEGES[key]}", callback_data=f"college|{key}")]
+    rows = [[InlineKeyboardButton(text=f"🎓 {COLLEGES[key]} · {COLLEGE_CITIES[key]}", callback_data=f"college|{key}")]
             for key in colleges_in_city(city)]
-    rows.append([InlineKeyboardButton(text="↩️ Выбрать город", callback_data="menu|city")])
+    rows.append([InlineKeyboardButton(text="↩️ Выбрать регион", callback_data="menu|city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def yamk_menu_keyboard():
+    from yamk import DEPARTMENTS
+    rows = [[InlineKeyboardButton(text=f"📚 {label}", callback_data=f"yamk|department|{key}")]
+            for key, (label, _description) in DEPARTMENTS.items()]
+    rows += [
+        [InlineKeyboardButton(text="👨‍🏫 Преподаватели", callback_data="yamk|teachers")],
+        [InlineKeyboardButton(text="🌐 Расписание на сайте ЯМК", url="https://www.ямк-салехард.рф/")],
+        [InlineKeyboardButton(text="🏙 Сменить регион или колледж", callback_data="menu|college")],
+    ]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def safe_edit(target, text, reply_markup=None):
@@ -170,15 +182,21 @@ async def remove_old_keyboard(m: Message):
 @dp.callback_query(F.data.startswith("menu|"))
 async def menu_action(c: CallbackQuery, state: FSMContext):
     action = c.data.split("|", 1)[1]
+    if action in ("home", "schedule"):
+        user = await get_user(c.from_user.id)
+        if user and user.get("college_id") == "yamk":
+            await safe_edit(c.message, "🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение или преподавателя:", reply_markup=yamk_menu_keyboard())
+            await c.answer()
+            return
     if action == "home":
         u = await get_user(c.from_user.id)
         role = "admin" if c.from_user.id == ADMIN_ID else (u["role"] if u else "student")
         college = (u or {}).get("college_id", "kuzpk")
         await safe_edit(c.message, f"🎓 <b>Расписание · {college_label(college)}</b>\nВыбери раздел:", reply_markup=main_menu(role, u["group_name"] if u else None, college))
     elif action == "college":
-        await safe_edit(c.message, "🏙 <b>Выбери город</b>", reply_markup=city_keyboard())
+        await safe_edit(c.message, "🗺 <b>Выбери регион</b>", reply_markup=city_keyboard())
     elif action == "city":
-        await safe_edit(c.message, "🏙 <b>Выбери город</b>", reply_markup=city_keyboard())
+        await safe_edit(c.message, "🗺 <b>Выбери регион</b>", reply_markup=city_keyboard())
     elif action == "schedule":
         u = await get_user(c.from_user.id)
         college_id = (u or {}).get("college_id", "kuzpk")
@@ -704,6 +722,10 @@ async def start(m: Message, state: FSMContext):
     role = "admin" if m.from_user.id == ADMIN_ID else (user["role"] if user else "student")
     await add_user(m.from_user.id, m.from_user.full_name, role)
     user = await get_user(m.from_user.id)
+    if user.get("college_id") == "yamk" and user.get("college_selected"):
+        await remove_old_keyboard(m)
+        await m.answer("🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение или преподавателя:", reply_markup=yamk_menu_keyboard())
+        return
     if not user["group_name"]:
         if user.get("college_selected"):
             markup = await group_keyboard(college_id=user.get("college_id", "kuzpk"))
@@ -730,11 +752,11 @@ async def check_subscription(c: CallbackQuery):
 @dp.callback_query(F.data.startswith("city|"))
 async def choose_city(c: CallbackQuery):
     city = c.data.split("|", 1)[1]
-    if city not in ("kemerovo", "prokopyevsk"):
-        await c.answer("Неизвестный город.", show_alert=True)
+    if city not in ("kuzbass", "yanao"):
+        await c.answer("Неизвестный регион.", show_alert=True)
         return
-    city_label = "Кемерово" if city == "kemerovo" else "Прокопьевск"
-    await safe_edit(c.message, f"🏙 <b>{city_label}</b>\n\nВыбери учебное заведение:", reply_markup=city_college_keyboard(city))
+    region_label = "Кузбасс · Кемерово и Прокопьевск" if city == "kuzbass" else "ЯНАО · Салехард"
+    await safe_edit(c.message, f"🗺 <b>{region_label}</b>\n\nВыбери учебное заведение:", reply_markup=city_college_keyboard(city))
     await c.answer()
 
 
@@ -749,6 +771,9 @@ async def choose_college(c: CallbackQuery):
     await add_user(c.from_user.id, c.from_user.full_name, role)
     await set_college(c.from_user.id, college_id)
     await c.answer()
+    if college_id == "yamk":
+        await safe_edit(c.message, "🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение или преподавателя:", reply_markup=yamk_menu_keyboard())
+        return
     groups = await list_groups(college_id)
     if not groups:
         await safe_edit(c.message,
@@ -759,6 +784,119 @@ async def choose_college(c: CallbackQuery):
     await safe_edit(c.message,
         f"🏫 <b>{college_label(college_id)}</b>\n\nВыбери специальность, затем свою группу:",
         reply_markup=markup)
+
+
+async def show_yamk_groups(target, page=0):
+    from yamk import get_groups
+    groups = await asyncio.to_thread(get_groups, "otp")
+    if not groups:
+        await safe_edit(target,
+            "📚 <b>ОТП · группы</b>\n\nНа сайте ЯМК сейчас не удалось загрузить список групп.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://www.ямк-салехард.рф/")],
+                [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
+            ]))
+        return
+    size = 12
+    pages = (len(groups) + size - 1) // size
+    page = max(0, min(page, pages - 1))
+    rows = [[InlineKeyboardButton(text=item["name"], callback_data=f"yamk|group|{item['name']}")]
+            for item in groups[page * size:(page + 1) * size]]
+    nav = []
+    if page:
+        nav.append(InlineKeyboardButton(text="‹", callback_data=f"yamk|groups|{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="yamk|noop"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton(text="›", callback_data=f"yamk|groups|{page+1}"))
+    rows.extend([nav,
+        [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
+        [InlineKeyboardButton(text="🌐 Сайт ЯМК", url="https://www.ямк-салехард.рф/")],
+    ])
+    await safe_edit(target,
+        f"📚 <b>ОТП · расписание по группам</b>\n\nВыбери группу · всего {len(groups)}:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@dp.callback_query(F.data.startswith("yamk|"))
+async def yamk_action(c: CallbackQuery):
+    parts = c.data.split("|", 2)
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "noop":
+        await c.answer()
+        return
+    if action == "department":
+        branch = parts[2] if len(parts) > 2 else ""
+        from yamk import DEPARTMENTS, get_department_pdf
+        if branch not in DEPARTMENTS:
+            await c.answer("Такое отделение не найдено.", show_alert=True)
+            return
+        if branch == "otp":
+            await show_yamk_groups(c.message)
+            await c.answer()
+            return
+        label, description = DEPARTMENTS[branch]
+        await safe_edit(c.message,
+            f"📚 <b>{label} · ЯМК</b>\n<i>{escape(description)}</i>\n\nЗагружаю актуальное расписание с сайта колледжа…",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
+            ]))
+        try:
+            content, filename = await asyncio.to_thread(get_department_pdf, branch)
+            await c.message.answer_document(
+                BufferedInputFile(content, filename=filename),
+                caption=f"📚 <b>{label} · ЯМК</b>\nИсточник: <a href=\"https://www.ямк-салехард.рф/\">официальное расписание колледжа</a>",
+                reply_markup=yamk_menu_keyboard(), parse_mode="HTML")
+        except Exception as error:
+            logging.exception("Не удалось загрузить расписание ЯМК (%s)", branch)
+            await c.message.answer(
+                f"Не получилось загрузить PDF сейчас. Открой расписание на сайте: "
+                f"<a href=\"https://www.ямк-салехард.рф/\">ЯМК · {label}</a>\n{escape(str(error))}",
+                reply_markup=yamk_menu_keyboard(), parse_mode="HTML")
+        await c.answer()
+        return
+    if action == "groups":
+        try:
+            page = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            page = 0
+        await show_yamk_groups(c.message, page)
+        await c.answer()
+        return
+    if action == "group":
+        group = parts[2] if len(parts) > 2 else ""
+        from yamk import get_group_schedule
+        try:
+            rows = await asyncio.to_thread(get_group_schedule, group)
+        except Exception:
+            logging.exception("Не удалось получить расписание группы ЯМК %s", group)
+            rows = []
+        schedule_days = sorted({date.fromisoformat(row["date"]) for row in rows if row.get("date")})
+        today = datetime.now(TZ).date()
+        monday = today - timedelta(days=today.weekday())
+        if not any(monday <= day < monday + timedelta(days=7) for day in schedule_days) and schedule_days:
+            monday = schedule_days[0] - timedelta(days=schedule_days[0].weekday())
+        by_day = {monday + timedelta(days=i): [] for i in range(7)}
+        for row in rows:
+            try:
+                row_day = date.fromisoformat(row["date"])
+            except (KeyError, ValueError):
+                continue
+            if row_day in by_day:
+                by_day[row_day].append(row)
+        text = f"🏫 <b>ЯМК · ОТП · {escape(group)}</b>\n" + format_week_schedule(group, monday, by_day)
+        if not rows:
+            text += "\n\nИсточник: <a href=\"https://www.ямк-салехард.рф/\">официальное расписание ЯМК</a>."
+        await safe_edit(c.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="↩️ Список групп ОТП", callback_data="yamk|groups|0")],
+            [InlineKeyboardButton(text="🏠 Отделения ЯМК", callback_data="menu|home")],
+        ]))
+        await c.answer()
+        return
+    if action == "teachers":
+        await show_entity_picker(c.message, "teacher", 0, edit=True, college_id="yamk")
+        await c.answer()
+        return
+    await c.answer("Действие не найдено.", show_alert=True)
 
 @dp.callback_query(F.data.startswith("group:"))
 async def choose_group(c: CallbackQuery):
