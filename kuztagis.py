@@ -58,30 +58,24 @@ def _room_value(value):
     return ""
 
 
-def _parse_workbook(content, filename):
-    import openpyxl
-    workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-    worksheet = workbook[workbook.sheetnames[0]]
+def _parse_worksheet(worksheet, filename):
     rows = list(worksheet.iter_rows(values_only=True))
     title = str((rows[0][0] if rows and rows[0] else "") or "")
     match = re.search(r"(\d{2}\.\d{2}\.\d{4})", title)
     if not match:
-        raise ValueError(f"Не нашёл дату в заголовке файла {filename}")
+        raise ValueError(f"Не нашёл дату в заголовке листа {worksheet.title} файла {filename}")
     schedule_date = datetime.strptime(match.group(1), "%d.%m.%Y").date().isoformat()
     group_starts = (1, 7, 13, 19)
     active_groups = {}
     result = []
     for row_index, row in enumerate(rows):
         row = list(row) + [None] * max(0, 25 - len(row))
-        # Group blocks start with a group code (for example, 26-А) in row 5,
-        # then repeat every eleven rows in this workbook layout.
         for base in group_starts:
             value = str(row[base] or "").strip()
             if re.match(r"^\d{2,3}[-–—][\wА-Яа-я]+", value):
                 active_groups[base] = value
-        raw_lesson_no = row[0]
         try:
-            lesson_no = int(raw_lesson_no)
+            lesson_no = int(row[0])
         except (TypeError, ValueError):
             continue
         if lesson_no < 1 or row_index + 1 >= len(rows):
@@ -91,8 +85,6 @@ def _parse_workbook(content, filename):
             group = active_groups.get(base)
             if not group:
                 continue
-            # Each group block has up to three parallel lesson columns. A
-            # teacher is in the same column on the following row.
             for subject_col in (base, base + 2, base + 4):
                 subject = str(row[subject_col] or "").strip()
                 teacher = str(teacher_row[subject_col] or "").strip()
@@ -102,14 +94,21 @@ def _parse_workbook(content, filename):
                     continue
                 room = _room_value(row[subject_col + 1])
                 if not room:
-                    # Some groups put the room in the final merged cell of
-                    # their block; use it when there is only one room shown.
                     rooms = [_room_value(row[col]) for col in range(base + 1, base + 6)]
                     rooms = [value for value in rooms if value]
                     room = rooms[0] if len(rooms) == 1 else ""
                 result.append({"date": schedule_date, "group": group,
                                "lesson_no": lesson_no, "lesson": str(lesson_no),
                                "subject": subject, "teacher": teacher, "room": room})
+    return result
+
+
+def _parse_workbook(content, filename):
+    import openpyxl
+    workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    result = []
+    for worksheet in workbook.worksheets:
+        result.extend(_parse_worksheet(worksheet, filename))
     workbook.close()
     return result
 
@@ -136,16 +135,32 @@ def _refresh():
         params = urllib.parse.urlencode({"public_key": _public_key(), "limit": 100})
         listing = _request_json(f"{API}?{params}")
         items = listing.get("_embedded", {}).get("items", [])
-        rows, bells = [], []
+        bells = []
+        # Prefer the most recently uploaded weekly workbook for each date.
+        # Older single-day files remain useful for dates not covered by it.
+        weekly_rows_by_date, daily_rows_by_date = {}, {}
+        items = sorted(items, key=lambda item: item.get("modified", ""), reverse=True)
         for item in items:
             name = item.get("name", "")
             path = item.get("path", "")
             if item.get("type") != "file":
                 continue
             if name.casefold().endswith(".xlsx"):
-                rows.extend(_parse_workbook(_read_public_file(path), name))
+                parsed_rows = _parse_workbook(_read_public_file(path), name)
+                rows_by_date = {}
+                for row in parsed_rows:
+                    rows_by_date.setdefault(row["date"], []).append(row)
+                if len(rows_by_date) > 1:
+                    for schedule_date, date_rows in rows_by_date.items():
+                        weekly_rows_by_date.setdefault(schedule_date, date_rows)
+                else:
+                    for schedule_date, date_rows in rows_by_date.items():
+                        daily_rows_by_date.setdefault(schedule_date, date_rows)
             elif name.casefold().endswith(".docx") and "звон" in name.casefold():
                 bells = _parse_bells(_read_public_file(path))
+        rows = []
+        for schedule_date in set(weekly_rows_by_date) | set(daily_rows_by_date):
+            rows.extend(weekly_rows_by_date.get(schedule_date, daily_rows_by_date.get(schedule_date, [])))
         _CACHE.update(rows=rows, bells=bells, until=time.monotonic() + 900)
     except Exception as exc:
         logging.warning("Не удалось обновить расписание КузТАГиС с Яндекс Диска: %s", exc)
