@@ -305,17 +305,55 @@ def _get(path):
 def get_department_pdf(branch):
     if branch not in DEPARTMENTS or branch == "otp":
         raise ValueError("Для этого отделения PDF не используется")
-    page = _SESSION.get(urljoin(BASE_URL, f"student/pdf.php?branch={branch}&?week=1"), timeout=25)
-    page.raise_for_status()
-    match = re.search(r'PDF_URL\s*=\s*["\']([^"\']+)', page.text)
-    if not match:
-        raise ValueError("На сайте не найдена ссылка на PDF расписания")
-    pdf_url = urljoin(page.url, match.group(1))
-    response = _SESSION.get(pdf_url, timeout=45)
-    response.raise_for_status()
-    if not response.content.startswith(b"%PDF"):
-        raise ValueError("Сайт вернул файл не в формате PDF")
-    return response.content, f"Расписание_ЯМК_{DEPARTMENTS[branch][0]}.pdf"
+    from datetime import date
+    from zoneinfo import ZoneInfo
+
+    today = datetime.now(ZoneInfo("Asia/Novokuznetsk")).date()
+    school_year = today.year if today.month >= 9 else today.year - 1
+    first_week = date(school_year, 9, 2)
+    current_week = max(1, (today - first_week).days // 7 + 1)
+    # Department PDF numbering can drift: one department may publish the
+    # current week as week 10 while another calls it week 11. Check nearby
+    # indexes and select by dates inside the PDF itself.
+    candidates = []
+    week_numbers = (current_week, current_week + 1, current_week - 1,
+                    current_week + 2, current_week - 2)
+    for week_number in week_numbers:
+        if week_number < 1:
+            continue
+        page = _SESSION.get(
+            urljoin(BASE_URL, "student/pdf.php"),
+            params={"branch": branch, "week": week_number}, timeout=25,
+        )
+        page.raise_for_status()
+        match = re.search(r'PDF_URL\s*=\s*["\']([^"\']+)', page.text)
+        if not match:
+            raise ValueError("На сайте не найдена ссылка на PDF расписания")
+        pdf_url = urljoin(page.url, match.group(1))
+        response = _SESSION.get(pdf_url, timeout=45)
+        if response.status_code == 404:
+            continue
+        response.raise_for_status()
+        if not response.content.startswith(b"%PDF"):
+            continue
+        try:
+            _groups, rows = _parse_department_pdf(response.content, branch)
+            dates = [datetime.strptime(row["date"], "%Y-%m-%d").date() for row in rows if row.get("date")]
+        except Exception:
+            logging.exception("Не удалось прочитать PDF ЯМК %s", pdf_url)
+            continue
+        if not dates:
+            continue
+        if min(dates) <= today <= max(dates):
+            return response.content, pdf_url.rsplit("/", 1)[-1]
+        distance = min(abs((value - today).days) for value in dates)
+        candidates.append((distance, max(dates), response.content, pdf_url.rsplit("/", 1)[-1]))
+
+    if candidates:
+        _distance, _last_date, content, filename = min(candidates, key=lambda item: (item[0], -item[1].toordinal()))
+        return content, filename
+
+    raise ValueError("На сайте ЯМК пока нет PDF расписания с распознаваемыми занятиями")
 
 
 def get_groups(branch="otp"):

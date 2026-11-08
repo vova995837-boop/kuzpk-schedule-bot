@@ -233,6 +233,12 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
     elif action == "group":
         user = await get_user(c.from_user.id)
         college_id = (user or {}).get("college_id", "kuzpk")
+        if college_id == "yamk":
+            await safe_edit(c.message,
+                "🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение, чтобы открыть его специальности и группы:",
+                reply_markup=yamk_menu_keyboard())
+            await c.answer()
+            return
         kb = await group_keyboard(college_id=college_id)
         await safe_edit(c.message, "🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:", reply_markup=kb or back_button())
     elif action == "bells":
@@ -705,12 +711,17 @@ async def specialty_groups(c: CallbackQuery):
     _, prefix, page = c.data.split("|")
     if prefix == "noop":
         await c.answer(); return
+    user = await get_user(c.from_user.id)
+    if user and user.get("college_id") == "yamk":
+        await safe_edit(c.message,
+            "🏫 <b>ЯМК · Салехард</b>\n\nЭтот список групп устарел. Выбери отделение, чтобы открыть актуальные группы:",
+            reply_markup=yamk_menu_keyboard())
+        await c.answer("Открыл актуальный выбор отделения ЯМК.")
+        return
     if prefix == "list":
-        user = await get_user(c.from_user.id)
         markup = await group_keyboard(college_id=(user or {}).get("college_id", "kuzpk"))
         text = "🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:"
     else:
-        user = await get_user(c.from_user.id)
         college_id = (user or {}).get("college_id", "kuzpk")
         markup = await group_keyboard(prefix, int(page), college_id)
         count = sum(str(g).startswith(prefix + "-") for g in await list_groups(college_id))
@@ -809,8 +820,8 @@ async def show_yamk_specialties(target, branch="otp"):
         groups = await asyncio.to_thread(get_groups, branch)
     except Exception as error:
         logging.exception("Не удалось загрузить группы ЯМК (%s)", branch)
-        message = ("Не удалось получить расписание из источника. Для отделений с PDF проверь ключ "
-                   "CONVERTAPI_TOKEN в Railway Variables и доступность сервиса конвертации.")
+        message = ("Не удалось загрузить расписание с сайта ЯМК. Попробуй ещё раз позже "
+                   "или открой официальный сайт колледжа.")
         await safe_edit(target,
             f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · ЯМК</b>\n\n{escape(message)}",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -957,6 +968,27 @@ async def choose_group(c: CallbackQuery):
     group = c.data.split(":", 1)[1]
     user = await get_user(c.from_user.id)
     college_id = (user or {}).get("college_id", "kuzpk")
+    if college_id == "yamk":
+        from yamk import DEPARTMENTS, get_groups as yamk_groups
+        branch = None
+        for candidate in DEPARTMENTS:
+            try:
+                items = await asyncio.to_thread(yamk_groups, candidate)
+            except Exception:
+                logging.exception("Не удалось проверить старую кнопку группы ЯМК (%s)", candidate)
+                continue
+            if any(item.get("name") == group for item in items):
+                branch = candidate
+                break
+        if not branch:
+            await safe_edit(c.message,
+                "🏫 <b>ЯМК · Салехард</b>\n\nНе удалось определить отделение для этой старой кнопки. Выбери отделение заново:",
+                reply_markup=yamk_menu_keyboard())
+            return
+        await set_college_branch(c.from_user.id, branch)
+        await set_group(c.from_user.id, group)
+        await render_schedule(c.message, c.from_user.id, datetime.now(TZ).date(), edit=True)
+        return
     if group not in await list_groups(college_id):
         await c.message.answer("Этой группы нет в расписании.")
         return
@@ -1001,13 +1033,34 @@ async def render_schedule(target, uid: int, day: date, mode: str = "d", page: in
         monday = day - timedelta(days=day.weekday())
         schedule = await get_week_schedule(u["group_name"], monday, u.get("college_id", "kuzpk"), u.get("college_branch"))
         text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_week_schedule(u["group_name"], monday, schedule)
+        if u.get("college_id") == "yamk" and not any(schedule.values()):
+            published = await _yamk_published_dates(u)
+            if published:
+                text += f"\n\nℹ️ На сайте ЯМК сейчас доступно расписание за {published[0]:%d.%m}–{published[-1]:%d.%m.%Y}."
         markup = schedule_keyboard(monday, mode)
     else:
         rows = await get_schedule(u["group_name"], day, u.get("college_id", "kuzpk"), u.get("college_branch"))
         text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_schedule(u["group_name"], day, rows)
+        if u.get("college_id") == "yamk" and not rows:
+            published = await _yamk_published_dates(u)
+            if published and day.isoformat() not in {value.isoformat() for value in published}:
+                text += f"\n\nℹ️ На сайте ЯМК сейчас доступно расписание за {published[0]:%d.%m}–{published[-1]:%d.%m.%Y}."
         markup = schedule_keyboard(day, mode)
     if edit: await safe_edit(target, text, reply_markup=markup)
     else: await target.answer(text, reply_markup=markup)
+
+
+async def _yamk_published_dates(user):
+    try:
+        from yamk import get_group_schedule
+        rows = await asyncio.to_thread(
+            get_group_schedule, user["group_name"], user.get("college_branch") or "otp"
+        )
+        values = sorted({date.fromisoformat(row["date"]) for row in rows if row.get("date")})
+        return values
+    except Exception:
+        logging.exception("Не удалось определить даты опубликованного расписания ЯМК")
+        return []
 
 async def send_day(m: Message, offset: int):
     day = datetime.now(TZ).date() + timedelta(days=offset)
