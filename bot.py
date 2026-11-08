@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 
 from db import init_db, add_user, get_user, set_group, set_college, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
-from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_all_announcement
+from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_college_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
 from education import list_documents, download_document, EducationError, EDUCATION_URL, PLANS_URL
 
@@ -50,8 +50,7 @@ def is_courses_group(group_name):
 def main_menu(role="student", group_name=None, college_id="kuzpk"):
     rows = [[InlineKeyboardButton(text="📅 Расписание", callback_data="menu|schedule")]]
     rows.append([InlineKeyboardButton(text="⚙️ Моя группа", callback_data="menu|group")])
-    if college_id == "kuzpk":
-        rows[-1].insert(0, InlineKeyboardButton(text="📢 Объявления", callback_data="menu|announcements"))
+    rows[-1].insert(0, InlineKeyboardButton(text="📢 Объявления", callback_data="menu|announcements"))
     if is_courses_group(group_name) and college_id == "kuzpk":
         rows.insert(1, [InlineKeyboardButton(text="📚 Курсы", callback_data="menu|courses")])
         rows.insert(2, [InlineKeyboardButton(text="🎓 Образование", callback_data="menu|education")])
@@ -94,6 +93,23 @@ def college_keyboard():
         [InlineKeyboardButton(text="↩️ Главное меню", callback_data="menu|home")],
     ])
 
+def city_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏙 Кемерово", callback_data="city|kemerovo")],
+        [InlineKeyboardButton(text="🏙 Прокопьевск", callback_data="city|prokopyevsk")],
+    ])
+
+def colleges_in_city(city):
+    city_ids = {"kemerovo": "Кемерово", "prokopyevsk": "Прокопьевск"}
+    label = city_ids.get(city)
+    return [key for key, value in COLLEGE_CITIES.items() if value == label]
+
+def city_college_keyboard(city):
+    rows = [[InlineKeyboardButton(text=f"🎓 {COLLEGES[key]}", callback_data=f"college|{key}")]
+            for key in colleges_in_city(city)]
+    rows.append([InlineKeyboardButton(text="↩️ Выбрать город", callback_data="menu|city")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 async def safe_edit(target, text, reply_markup=None):
     try:
         await target.edit_text(text, reply_markup=reply_markup)
@@ -115,7 +131,9 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
         college = (u or {}).get("college_id", "kuzpk")
         await safe_edit(c.message, f"🎓 <b>Расписание · {college_label(college)}</b>\nВыбери раздел:", reply_markup=main_menu(role, u["group_name"] if u else None, college))
     elif action == "college":
-        await safe_edit(c.message, "🏫 <b>Выбери колледж</b>\nУ каждого колледжа своё расписание и список групп:", reply_markup=college_keyboard())
+        await safe_edit(c.message, "🏙 <b>Выбери город</b>", reply_markup=city_keyboard())
+    elif action == "city":
+        await safe_edit(c.message, "🏙 <b>Выбери город</b>", reply_markup=city_keyboard())
     elif action == "schedule":
         u = await get_user(c.from_user.id)
         college_id = (u or {}).get("college_id", "kuzpk")
@@ -158,28 +176,29 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
     elif action == "rooms":
         user = await get_user(c.from_user.id)
         college_id = (user or {}).get("college_id", "kuzpk")
-        if college_id == "pgt":
+        if college_id in ("pgt", "kuztagis"):
             await show_entity_picker(c.message, "room", 0, edit=True, college_id=college_id)
         else:
             await show_building_picker(c.message, edit=True, college_id=college_id)
     elif action == "announcements":
         user = await get_user(c.from_user.id)
-        if (user or {}).get("college_id") != "kuzpk":
-            await c.answer("Объявления доступны только для КузПК.", show_alert=True)
-            return
-        rows = await recent_announcements()
+        college_id = (user or {}).get("college_id", "kuzpk")
+        rows = await recent_announcements(college_id=college_id)
         cards = [f"📣 <b>{escape(r['group_name'] or 'Колледж')}</b> · <i>{escape(r['created_at'])}</i>\n{escape(r['body'])}" for r in rows[:5]]
         await safe_edit(c.message, "📢 <b>Последние объявления</b>\n\n" + ("\n\n──────────\n\n".join(cards) if cards else "Пока объявлений нет."), reply_markup=back_button())
     elif action == "management":
         u = await get_user(c.from_user.id)
         role = "admin" if c.from_user.id == ADMIN_ID else (u["role"] if u else "student")
+        college_id = (u or {}).get("college_id", "kuzpk")
         if role == "student":
             await c.answer("Недостаточно прав.", show_alert=True); return
         rows = [[InlineKeyboardButton(text="📣 Объявление группе", callback_data="manage|group")]]
         if c.from_user.id == ADMIN_ID:
+            rows += [[InlineKeyboardButton(text="📊 Пользователи", callback_data="manage|stats")]]
+            rows += [[InlineKeyboardButton(text=f"📢 Объявление · {college_name}", callback_data=f"manage|college:{key}")]
+                     for key, college_name in COLLEGES.items()]
             rows += [
-                [InlineKeyboardButton(text="📊 Пользователи", callback_data="manage|stats")],
-                [InlineKeyboardButton(text="📢 Объявление всем", callback_data="manage|all")],
+                [InlineKeyboardButton(text="📢 Объявление всем колледжам", callback_data="manage|all")],
                 [InlineKeyboardButton(text="👥 Назначить роль", callback_data="manage|roles")],
             ]
         rows += [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]]
@@ -422,7 +441,7 @@ async def show_entity_picker(target, kind: str, page: int, edit: bool = False, c
     pages = (len(names) + size - 1) // size
     page = max(0, min(page, pages - 1))
     today = datetime.now(TZ).date()
-    buttons = [[InlineKeyboardButton(text=name[:60], callback_data=f"entity|{kind}|{i}|{today:%Y%m%d}")
+    buttons = [[InlineKeyboardButton(text=name[:60], callback_data=f"entitystart|{kind}|{i}|{today:%Y%m%d}")
                 for i, name in enumerate(names[page*size:(page+1)*size], start=page*size)]
                [i:i+2] for i in range(0, len(names[page*size:(page+1)*size]), 2)]
     nav = []
@@ -445,13 +464,20 @@ async def entity_picker_page(c: CallbackQuery):
         await show_entity_picker(c.message, kind, int(raw_page), edit=True, college_id=(user or {}).get("college_id", "kuzpk"))
     await c.answer()
 
-async def render_entity_schedule(target, kind: str, index: int, day: date, edit: bool = True, college_id="kuzpk"):
+async def render_entity_schedule(target, kind: str, index: int, day: date, edit: bool = True, college_id="kuzpk", nearest_if_empty=False):
     names = await get_entity_names(kind, college_id)
     if index < 0 or index >= len(names):
         await safe_edit(target, "Список изменился. Выбери запись ещё раз.", reply_markup=back_button())
         return
     name = names[index]
     rows = await get_entity_schedule(kind, name, day, college_id)
+    if nearest_if_empty and not rows and college_id in ("pgt", "kuztagis"):
+        available = await get_entity_schedule(kind, name, None, college_id)
+        dates = sorted({date.fromisoformat(str(row["date"])) for row in available if row.get("date")})
+        if dates:
+            upcoming = [schedule_day for schedule_day in dates if schedule_day >= day]
+            day = upcoming[0] if upcoming else dates[-1]
+            rows = [row for row in available if row.get("date") == day.isoformat()]
     text = format_schedule(name, day, rows, entity_type=kind)
     picker_page = index // 8
     nav = [InlineKeyboardButton(text="‹ День", callback_data=f"entity|{kind}|{index}|{(day-timedelta(days=1)):%Y%m%d}"),
@@ -470,6 +496,14 @@ async def entity_schedule_navigation(c: CallbackQuery):
     day = datetime.strptime(raw_date, "%Y%m%d").date()
     user = await get_user(c.from_user.id)
     await render_entity_schedule(c.message, kind, int(raw_index), day, college_id=(user or {}).get("college_id", "kuzpk"))
+    await c.answer()
+
+@dp.callback_query(F.data.startswith("entitystart|"))
+async def entity_schedule_start(c: CallbackQuery):
+    _, kind, raw_index, raw_date = c.data.split("|")
+    day = datetime.strptime(raw_date, "%Y%m%d").date()
+    user = await get_user(c.from_user.id)
+    await render_entity_schedule(c.message, kind, int(raw_index), day, college_id=(user or {}).get("college_id", "kuzpk"), nearest_if_empty=True)
     await c.answer()
 
 def building_title(building):
@@ -531,15 +565,23 @@ async def management_action(c: CallbackQuery, state: FSMContext):
         u = await get_user(c.from_user.id)
         if not u or (c.from_user.id != ADMIN_ID and u["role"] != "starosta"):
             await c.answer("Недостаточно прав.", show_alert=True); return
-        if u.get("college_id") != "kuzpk":
-            await c.answer("Рассылка объявлений подключена только для КузПК.", show_alert=True); return
         await state.set_state(Forms.announcement)
         await safe_edit(c.message, "📣 <b>Объявление группе</b>\n\nОтправь текст сообщения. Рассылка пойдёт в твою группу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")]]))
+    elif action.startswith("college:"):
+        if c.from_user.id != ADMIN_ID:
+            await c.answer("Недостаточно прав.", show_alert=True); return
+        college_id = action.split(":", 1)[1]
+        if college_id not in COLLEGES:
+            await c.answer("Неизвестный колледж.", show_alert=True); return
+        await state.update_data(pending_college=college_id)
+        await state.set_state(Forms.admin_announcement)
+        await safe_edit(c.message, f"📢 <b>Объявление · {escape(COLLEGES[college_id])}</b>\n\nОтправь текст. Перед рассылкой покажу предпросмотр.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")]]))
     elif action == "all":
         if c.from_user.id != ADMIN_ID:
             await c.answer("Недостаточно прав.", show_alert=True); return
+        await state.update_data(pending_college=None)
         await state.set_state(Forms.admin_announcement)
-        await safe_edit(c.message, "📢 <b>Объявление колледжа</b>\n\nОтправь текст. Перед рассылкой я покажу предпросмотр и попрошу подтверждение.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")]]))
+        await safe_edit(c.message, "📢 <b>Объявление всем колледжам</b>\n\nОтправь текст. Перед рассылкой я покажу предпросмотр и попрошу подтверждение.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")]]))
     elif action == "roles":
         if c.from_user.id != ADMIN_ID:
             await c.answer("Недостаточно прав.", show_alert=True); return
@@ -614,16 +656,28 @@ async def start(m: Message, state: FSMContext):
     await add_user(m.from_user.id, m.from_user.full_name, role)
     user = await get_user(m.from_user.id)
     if not user["group_name"]:
-        kb = college_keyboard()
-        if kb:
+        if user.get("college_selected"):
+            markup = await group_keyboard(college_id=user.get("college_id", "kuzpk"))
             await remove_old_keyboard(m)
-            await m.answer("🏫 <b>Выбери колледж</b>\nПосле этого выбери свою учебную группу:", reply_markup=kb)
+            await m.answer(f"🎓 <b>{college_label(user.get('college_id', 'kuzpk'))}</b>\nВыбери специальность, затем свою группу:", reply_markup=markup or back_button())
         else:
-            await m.answer("Привет! Список групп пока не загружен. Администратор должен подключить расписание.", reply_markup=ReplyKeyboardRemove())
+            await remove_old_keyboard(m)
+            await m.answer("👋 Привет! Сначала выбери город:", reply_markup=city_keyboard())
         return
     await remove_old_keyboard(m)
     college_id = user.get("college_id", "kuzpk")
     await m.answer(f"🎓 <b>Расписание · {college_label(college_id)}</b>\nТвоя группа: <b>{escape(str(user['group_name']))}</b>\n\nВыбери раздел ниже:", reply_markup=main_menu(role, user["group_name"], college_id))
+
+
+@dp.callback_query(F.data.startswith("city|"))
+async def choose_city(c: CallbackQuery):
+    city = c.data.split("|", 1)[1]
+    if city not in ("kemerovo", "prokopyevsk"):
+        await c.answer("Неизвестный город.", show_alert=True)
+        return
+    city_label = "Кемерово" if city == "kemerovo" else "Прокопьевск"
+    await safe_edit(c.message, f"🏙 <b>{city_label}</b>\n\nВыбери учебное заведение:", reply_markup=city_college_keyboard(city))
+    await c.answer()
 
 
 @dp.callback_query(F.data.startswith("college|"))
@@ -641,7 +695,7 @@ async def choose_college(c: CallbackQuery):
     if not groups:
         await safe_edit(c.message,
             f"🏫 <b>{college_label(college_id)}</b>\n\nНе удалось загрузить группы. Проверь, что источник расписания доступен.",
-            reply_markup=college_keyboard())
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="↩️ Выбрать город", callback_data="menu|city")]]))
         return
     markup = await group_keyboard(college_id=college_id)
     await safe_edit(c.message,
@@ -774,7 +828,8 @@ async def change_group(m: Message):
 
 @dp.message(F.text == "📢 Объявления")
 async def announcements(m: Message):
-    rows = await recent_announcements()
+    user = await get_user(m.from_user.id)
+    rows = await recent_announcements(college_id=(user or {}).get("college_id", "kuzpk"))
     if not rows:
         await m.answer("📢 <b>Объявления</b>\n\nПока объявлений нет."); return
     cards = [f"📣 <b>{escape(r['group_name'] or 'Колледж')}</b> · <i>{escape(r['created_at'])}</i>\n{escape(r['body'])}" for r in rows]
@@ -789,7 +844,9 @@ async def management(m: Message):
     buttons = [[InlineKeyboardButton(text="📣 Объявление группе", callback_data="manage|group")]]
     if m.from_user.id == ADMIN_ID:
         buttons.append([InlineKeyboardButton(text="📊 Пользователи", callback_data="manage|stats")])
-        buttons.append([InlineKeyboardButton(text="📢 Объявление всем", callback_data="manage|all")])
+        for college_id, college_name in COLLEGES.items():
+            buttons.append([InlineKeyboardButton(text=f"📢 Объявление · {college_name}", callback_data=f"manage|college:{college_id}")])
+        buttons.append([InlineKeyboardButton(text="📢 Объявление всем колледжам", callback_data="manage|all")])
         buttons.append([InlineKeyboardButton(text="👥 Назначить роль", callback_data="manage|roles")])
     buttons.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -798,8 +855,6 @@ async def management(m: Message):
 @dp.message(F.text == "📣 Объявление группе")
 async def ask_group_announcement(m: Message, state: FSMContext):
     u = await get_user(m.from_user.id)
-    if u and u.get("college_id") != "kuzpk":
-        await m.answer("Рассылка объявлений подключена только для КузПК."); return
     if not u or (m.from_user.id != ADMIN_ID and u["role"] != "starosta"):
         await m.answer("Недостаточно прав."); return
     await state.set_state(Forms.announcement)
@@ -808,8 +863,6 @@ async def ask_group_announcement(m: Message, state: FSMContext):
 @dp.message(Forms.announcement)
 async def group_announcement(m: Message, state: FSMContext):
     u = await get_user(m.from_user.id)
-    if u and u.get("college_id") != "kuzpk":
-        await m.answer("Рассылка объявлений подключена только для КузПК."); await state.clear(); return
     if not u or (m.from_user.id != ADMIN_ID and u["role"] != "starosta"):
         await m.answer("Недостаточно прав."); await state.clear(); return
     if not u["group_name"]:
@@ -817,8 +870,9 @@ async def group_announcement(m: Message, state: FSMContext):
     if not m.text:
         await m.answer("Отправь объявление текстом."); return
     body = m.text.strip()
-    await save_announcement(m.from_user.id, u["group_name"], body)
-    sent = await send_group_announcement(bot, u["group_name"], body)
+    college_id = u.get("college_id", "kuzpk")
+    await save_announcement(m.from_user.id, u["group_name"], body, college_id)
+    sent = await send_group_announcement(bot, u["group_name"], body, college_id)
     await m.answer(f"Готово. Отправлено: {sent} пользователям.")
     await state.clear()
 
@@ -826,6 +880,7 @@ async def group_announcement(m: Message, state: FSMContext):
 async def ask_all_announcement(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         await m.answer("Эта функция доступна только главному администратору."); return
+    await state.update_data(pending_college=None)
     await state.set_state(Forms.admin_announcement)
     await m.answer("Напиши текст общего объявления. Оно будет отправлено всем пользователям:")
 
@@ -836,9 +891,12 @@ async def all_announcement(m: Message, state: FSMContext):
     if not m.text:
         await m.answer("Отправь объявление текстом."); return
     await state.update_data(pending_broadcast=m.text.strip())
+    data = await state.get_data()
+    college_id = data.get("pending_college")
+    audience = f"колледжу {COLLEGES[college_id]}" if college_id in COLLEGES else "всем колледжам"
     await state.set_state(Forms.admin_announcement_confirm)
     kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="✅ Подтвердить рассылку", callback_data="broadcast|yes"), InlineKeyboardButton(text="❌ Отмена", callback_data="broadcast|no")]])
-    await m.answer(f"Предпросмотр сообщения для всех зарегистрированных пользователей:\n\n<blockquote>{escape(m.text.strip())}</blockquote>\n\nОтправить?", reply_markup=kb)
+    await m.answer(f"Предпросмотр сообщения для {audience}:\n\n<blockquote>{escape(m.text.strip())}</blockquote>\n\nОтправить?", reply_markup=kb)
 
 @dp.callback_query(F.data.startswith("broadcast|"))
 async def confirm_broadcast(c: CallbackQuery, state: FSMContext):
@@ -850,8 +908,13 @@ async def confirm_broadcast(c: CallbackQuery, state: FSMContext):
     body = data.get("pending_broadcast")
     if not body:
         await safe_edit(c.message, "Черновик не найден. Начни создание объявления заново."); await state.clear(); await c.answer(); return
-    await save_announcement(c.from_user.id, "Колледж", body)
-    sent = await send_all_announcement(bot, body)
+    college_id = data.get("pending_college")
+    if college_id in COLLEGES:
+        await save_announcement(c.from_user.id, f"Колледж · {COLLEGES[college_id]}", body, college_id)
+        sent = await send_college_announcement(bot, college_id, COLLEGES[college_id], body)
+    else:
+        await save_announcement(c.from_user.id, "Все колледжи", body, "all")
+        sent = await send_all_announcement(bot, body)
     await safe_edit(c.message, f"✅ Объявление отправлено {sent} пользователям.")
     await state.clear()
     await c.answer()

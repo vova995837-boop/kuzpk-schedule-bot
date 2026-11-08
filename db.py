@@ -20,6 +20,12 @@ async def init_db():
         columns = {row[1] for row in await (await db.execute("PRAGMA table_info(users)")).fetchall()}
         if "college_id" not in columns:
             await db.execute("ALTER TABLE users ADD COLUMN college_id TEXT NOT NULL DEFAULT 'kuzpk'")
+        if "college_selected" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN college_selected INTEGER NOT NULL DEFAULT 0")
+            await db.execute("UPDATE users SET college_selected=1 WHERE group_name IS NOT NULL AND group_name!=''")
+        announcement_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(announcements)")).fetchall()}
+        if "college_id" not in announcement_columns:
+            await db.execute("ALTER TABLE announcements ADD COLUMN college_id TEXT NOT NULL DEFAULT 'kuzpk'")
         await db.commit()
 
 async def add_user(uid, name, role="student"):
@@ -42,7 +48,7 @@ async def set_group(uid, group):
 
 async def set_college(uid, college_id):
     async with aiosqlite.connect(_database_path()) as db:
-        await db.execute("UPDATE users SET college_id=?, group_name=NULL WHERE telegram_id=?", (college_id, uid))
+        await db.execute("UPDATE users SET college_id=?, college_selected=1, group_name=NULL WHERE telegram_id=?", (college_id, uid))
         await db.commit()
 
 async def set_role(uid, role):
@@ -55,9 +61,17 @@ async def list_groups(college_id="kuzpk"):
     from sheets import get_groups
     return await get_groups(college_id)
 
-async def users_for_group(group):
+async def users_for_group(group, college_id=None):
     async with aiosqlite.connect(_database_path()) as db:
-        cur = await db.execute("SELECT telegram_id FROM users WHERE group_name=?", (group,))
+        if college_id:
+            cur = await db.execute("SELECT telegram_id FROM users WHERE group_name=? AND college_id=?", (group, college_id))
+        else:
+            cur = await db.execute("SELECT telegram_id FROM users WHERE group_name=?", (group,))
+        return [r[0] for r in await cur.fetchall()]
+
+async def users_for_college(college_id):
+    async with aiosqlite.connect(_database_path()) as db:
+        cur = await db.execute("SELECT telegram_id FROM users WHERE college_id=? AND college_selected=1", (college_id,))
         return [r[0] for r in await cur.fetchall()]
 
 async def all_users():
@@ -65,13 +79,13 @@ async def all_users():
         cur = await db.execute("SELECT telegram_id FROM users")
         return [r[0] for r in await cur.fetchall()]
 
-async def save_announcement(uid, group, body):
+async def save_announcement(uid, group, body, college_id="kuzpk"):
     async with aiosqlite.connect(_database_path()) as db:
-        await db.execute("INSERT INTO announcements(telegram_id,group_name,body) VALUES(?,?,?)", (uid, group, body))
+        await db.execute("INSERT INTO announcements(telegram_id,group_name,body,college_id) VALUES(?,?,?,?)", (uid, group, body, college_id))
         await db.commit()
 
-async def recent_announcements(limit=10):
+async def recent_announcements(limit=10, college_id="kuzpk"):
     async with aiosqlite.connect(_database_path()) as db:
         db.row_factory = aiosqlite.Row
-        cur = await db.execute("SELECT group_name,body,created_at FROM announcements ORDER BY id DESC LIMIT ?", (limit,))
+        cur = await db.execute("SELECT group_name,body,created_at FROM announcements WHERE college_id IN (?, 'all') ORDER BY id DESC LIMIT ?", (college_id, limit))
         return [dict(r) for r in await cur.fetchall()]

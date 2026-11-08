@@ -1,6 +1,6 @@
 from html import escape
 from datetime import timedelta
-from db import users_for_group, all_users
+from db import users_for_group, users_for_college, all_users
 
 def format_schedule(group, day, rows, entity_type="group"):
     weekdays = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
@@ -96,12 +96,22 @@ def format_bells(rows):
     if note: out.append("\n<i>ℹ️ " + escape(str(note)) + "</i>")
     return "\n".join(out)
 
-async def send_group_announcement(bot, group, text):
-    ids = await users_for_group(group)
+async def send_group_announcement(bot, group, text, college_id="kuzpk"):
+    ids = await users_for_group(group, college_id)
     sent = 0
     for uid in ids:
         try:
             await bot.send_message(uid, f"📢 <b>Объявление группы {escape(str(group))}</b>\n\n{escape(str(text))}")
+            sent += 1
+        except Exception: pass
+    return sent
+
+async def send_college_announcement(bot, college_id, college_name, text):
+    ids = await users_for_college(college_id)
+    sent = 0
+    for uid in ids:
+        try:
+            await bot.send_message(uid, f"📢 <b>Объявление · {escape(str(college_name))}</b>\n\n{escape(str(text))}")
             sent += 1
         except Exception: pass
     return sent

@@ -51,7 +51,9 @@ def _room_value(value):
     text = str(value).strip()
     if not text or len(text) > 32:
         return ""
-    if re.fullmatch(r"\d{3,4}(?:[-/]\d+)?", text) or re.fullmatch(r"\d+\s*этаж", text, re.I):
+    if (re.fullmatch(r"\d{3,4}(?:[-/]\d+)?", text)
+            or re.fullmatch(r"\d+\s*этаж", text, re.I)
+            or re.search(r"(?:спорт|тренаж[её]р|гимнаст|мастерск|кабинет|аудитори|зал)", text, re.I)):
         return text
     return ""
 

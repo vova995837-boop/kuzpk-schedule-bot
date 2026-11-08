@@ -456,7 +456,7 @@ async def get_entity_names(kind, college_id="kuzpk"):
         rows = await get_rooms(college_id)
         key = "room"
     names = {str(r.get(key, "")).strip() for r in rows if r.get(key)}
-    if kind == "room":
+    if kind == "room" and college_id == "kuzpk":
         names = {name for name in names if room_building(name) in (1, 2, 3, 4)}
     return sorted(names)
 
@@ -468,18 +468,19 @@ def room_building(room):
         return int(value[0])
     return 0
 
-async def get_entity_schedule(kind, value, day: date, college_id="kuzpk"):
+async def get_entity_schedule(kind, value, day: date | None, college_id="kuzpk"):
     if college_id == "pgt":
         from pgt import get_entity_rows
         rows = await get_entity_rows(kind, value)
-        return [r for r in rows if r.get("date") == day.isoformat()]
+        return rows if day is None else [r for r in rows if r.get("date") == day.isoformat()]
     if college_id == "kuztagis":
         from kuztagis import get_rows
         all_rows = await asyncio.to_thread(get_rows)
-        new_rows = [r for r in all_rows if r.get("date") == day.isoformat()]
+        new_rows = [r for r in all_rows if day is None or r.get("date") == day.isoformat()]
         key = "teacher" if kind == "teacher" else "room"
-        return _collapse_lessons([{k: r.get(k) for k in ("lesson_no", "lesson", "subject", "teacher", "room", "group")}
-                                  for r in new_rows if str(r.get(key, "")).strip() == value])
+        result = [{k: r.get(k) for k in ("date", "lesson_no", "lesson", "subject", "teacher", "room", "group")}
+                  for r in new_rows if str(r.get(key, "")).strip() == value]
+        return _collapse_lessons(result)
     new_rows = _new_schedule_rows()
     if new_rows:
         key = "teacher" if kind == "teacher" else "room"
