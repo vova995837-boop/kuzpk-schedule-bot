@@ -285,7 +285,7 @@ def _department_schedule(branch):
     pdf_bytes, _filename = get_department_pdf(branch)
     groups, rows = _parse_department_pdf(pdf_bytes, branch)
     if not groups:
-        raise ValueError("В Excel после конвертации не удалось распознать столбцы групп")
+        raise ValueError("Не удалось распознать группы в PDF расписания ЯМК")
     _DEPARTMENT_DATA[branch] = (time.monotonic() + _CACHE_TTL, groups, rows)
     return list(groups), list(rows)
 
