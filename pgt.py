@@ -44,7 +44,7 @@ def _index(kind):
 
 
 def _periods(table):
-    """Read day blocks where the first cell spans six lessons."""
+    """Read every lesson row in day blocks with a row-spanned date cell."""
     rows = table.find_all("tr")
     result = []
     active_date = None
@@ -52,21 +52,33 @@ def _periods(table):
         cells = tr.find_all("td", recursive=False)
         if not cells:
             continue
-        first = cells[0]
-        if first.get("rowspan"):
-            match = re.search(r"(\d{2}\.\d{2}\.\d{4})", first.get_text(" ", strip=True))
+        # The date cell appears only in the first row of a six-lesson block.
+        # In following rows the lesson moves to cells[0], so always locate the
+        # date cell explicitly instead of assuming a fixed column position.
+        date_cell = None
+        for cell in cells:
+            if not cell.get("rowspan"):
+                continue
+            match = re.search(r"(\d{2}\.\d{2}\.\d{4})", cell.get_text(" ", strip=True))
             if match:
+                date_cell = cell
                 try:
                     active_date = datetime.strptime(match.group(1), "%d.%m.%Y").date().isoformat()
                 except ValueError:
                     active_date = None
-        if active_date is None or len(cells) < 2:
+                break
+        if active_date is None:
             continue
-        lesson_text = cells[1].get_text(" ", strip=True)
+
+        lesson_index = cells.index(date_cell) + 1 if date_cell is not None else 0
+        details_index = lesson_index + 1
+        if details_index >= len(cells):
+            continue
+        lesson_text = cells[lesson_index].get_text(" ", strip=True)
         number = re.match(r"\s*(\d+)", lesson_text)
         if not number:
             continue
-        details = cells[-1].get_text(" ", strip=True)
+        details = cells[details_index].get_text(" ", strip=True)
         if not details:
             continue
         time_match = re.search(r"(\d{1,2}[.:]\d{2})\s*[-–]\s*(\d{1,2}[.:]\d{2})", lesson_text)
