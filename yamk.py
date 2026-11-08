@@ -139,16 +139,26 @@ def _parse_group_cell(value, room_value, state, current_date, group_name, specia
     time_matches = list(_TIME_RE.finditer(time_text))
     start = f"{time_matches[0].group(1)}:{time_matches[0].group(2)}" if time_matches else ""
     end = f"{time_matches[-1].group(3)}:{time_matches[-1].group(4)}" if time_matches else ""
+    if "поднятие флага" in " ".join(lines).casefold() and time_matches:
+        end = f"{time_matches[0].group(3)}:{time_matches[0].group(4)}"
+    has_subject_on_row = False
     for line in lines:
         line = _cell_text(line)
+        if room_value and line.casefold() == room_value.casefold():
+            continue
+        if _room_from_text(line) and re.fullmatch(r"(?:\d{2,3}\s*[А-ЯЁA-Z]|АКТ\.?\s*З|КОНФ\.?\s*З|ЗАЛ)", line, re.IGNORECASE):
+            continue
         teachers = list(_TEACHER_RE.finditer(line))
         if teachers:
             subject = _cell_text(line[:teachers[0].start()]).strip(" -/;:")
             if subject and subject.casefold() not in {"поднятие флага", "разговор о важном"}:
-                subject = re.sub(r"^\d+(?:\s*[-–]\s*\d+)?\s*[-–.]?\s*", "", subject)
+                subject = re.sub(r"^\d+(?:\s+\d+|\s*[-–]\s*\d+)?\s*(?:[/–.-])?\s*", "", subject)
                 state["subject"] = subject or state.get("subject", "")
+                has_subject_on_row = True
             tail = line[teachers[-1].end():]
             room = room_value or _room_from_text(tail) or state.get("room", "")
+            pending = state.get("pending_time") or (start, end)
+            lesson_start, lesson_end = (start, end) if has_subject_on_row else pending
             for teacher_match in teachers:
                 initials = re.sub(r"\s+", "", teacher_match.group(2))
                 teacher = f"{teacher_match.group(1)} {initials}"
@@ -160,11 +170,15 @@ def _parse_group_cell(value, room_value, state, current_date, group_name, specia
                 lesson_no = sum(1 for row in records if row["date"] == current_date and row["group"] == group_name) + 1
                 records.append({"date": current_date, "group": group_name, "specialty": specialty,
                                 "lesson_no": lesson_no, "lesson": str(lesson_no), "subject": subject_text,
-                                "teacher": teacher, "room": room, "start": start, "end": end})
+                                "teacher": teacher, "room": room, "start": lesson_start, "end": lesson_end})
+            state["pending_time"] = None
         elif line.casefold() not in {"поднятие флага", "разговор о важном"}:
-            line = re.sub(r"^\d+(?:\s*[-–]\s*\d+)?\s*[-–.]?\s*", "", line)
+            line = re.sub(r"^\d+(?:\s+\d+|\s*[-–]\s*\d+)?\s*(?:[/–.-])?\s*", "", line)
             if line and not re.fullmatch(r"\d{1,2}\s*\d{1,2}", line):
                 state["subject"] = line
+                has_subject_on_row = True
+                if time_matches:
+                    state["pending_time"] = (start, end)
 
 
 def _parse_department_pdf(pdf_bytes, branch):
@@ -247,7 +261,10 @@ def _parse_department_pdf(pdf_bytes, branch):
                     start_col, room_or_end, group_name, specialty = column
                     if branch == "osep":
                         end_col = room_or_end
-                        value = "\n".join(_cell_text(cell) for cell in row[start_col:end_col] if _cell_text(cell))
+                        value = "\n".join(
+                            line.strip() for cell in row[start_col:end_col]
+                            if cell for line in str(cell).replace("\xa0", " ").splitlines() if line.strip()
+                        )
                         room_value = next((_cell_text(cell) for cell in reversed(row[start_col:end_col])
                                            if _room_from_text(_cell_text(cell))), "")
                     else:
