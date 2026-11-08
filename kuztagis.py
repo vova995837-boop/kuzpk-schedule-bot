@@ -33,8 +33,14 @@ def _public_key():
 
 def _read_public_file(path):
     params = urllib.parse.urlencode({"public_key": _public_key(), "path": path})
-    meta = _request_json(f"{API}/download?{params}")
-    request = urllib.request.Request(meta["href"], headers={"User-Agent": "KuzScheduleBot/1.0"})
+    # The public-resource metadata endpoint includes a short-lived direct file
+    # URL. Use it instead of /download, which Yandex may rate-limit (429) for
+    # public folders even when listing and reading metadata still work.
+    meta = _request_json(f"{API}?{params}")
+    href = meta.get("file") or meta.get("href")
+    if not href:
+        raise ValueError(f"Яндекс Диск не вернул ссылку на файл {path}")
+    request = urllib.request.Request(href, headers={"User-Agent": "KuzScheduleBot/1.0"})
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read()
 
@@ -120,7 +126,9 @@ def _parse_bells(content):
 
 def _refresh():
     """Fetch public files once in a while and retain the last good copy on errors."""
-    if time.monotonic() < _CACHE["until"] and _CACHE["rows"]:
+    # Honor the retry window even when the cache is empty; otherwise every
+    # get_rows()/get_bells() call retries immediately after a failed fetch.
+    if time.monotonic() < _CACHE["until"]:
         return
     try:
         params = urllib.parse.urlencode({"public_key": _public_key(), "limit": 100})
