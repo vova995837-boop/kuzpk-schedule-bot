@@ -4,6 +4,7 @@ from html import escape
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardRemove, BufferedInputFile
@@ -29,6 +30,50 @@ if not TOKEN or TOKEN in ("ВСТАВЬ_ТОКЕН_ОТ_BOTFATHER", "PASTE_TOKEN
 bot = Bot(TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
 dp = Dispatcher()
 logging.basicConfig(level=logging.INFO)
+
+SUBSCRIPTION_CHANNEL = "@prostoviva"
+SUBSCRIPTION_URL = "https://t.me/prostoviva"
+
+def subscription_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Подписаться на канал", url=SUBSCRIPTION_URL)],
+        [InlineKeyboardButton(text="✅ Проверить подписку", callback_data="subscription|check")],
+    ])
+
+async def is_subscribed(user_id: int) -> bool:
+    try:
+        member = await bot.get_chat_member(SUBSCRIPTION_CHANNEL, user_id)
+        return member.status in {"member", "administrator", "creator"}
+    except Exception:
+        logging.exception("Не удалось проверить подписку на канал %s", SUBSCRIPTION_CHANNEL)
+        return False
+
+async def show_subscription_prompt(message: Message):
+    await message.answer(
+        "🔒 <b>Чтобы пользоваться ботом, подпишись на наш Telegram-канал.</b>\n"
+        "После подписки нажми кнопку «Проверить подписку».",
+        reply_markup=subscription_keyboard(),
+    )
+
+class SubscriptionMiddleware(BaseMiddleware):
+    async def __call__(self, handler, event, data):
+        user = getattr(event, "from_user", None)
+        if user is None:
+            return await handler(event, data)
+        if isinstance(event, Message) and event.text and event.text.split() and event.text.split()[0].split("@")[0] == "/start":
+            return await handler(event, data)
+        if isinstance(event, CallbackQuery) and event.data == "subscription|check":
+            return await handler(event, data)
+        if await is_subscribed(user.id):
+            return await handler(event, data)
+        if isinstance(event, Message):
+            await show_subscription_prompt(event)
+        elif isinstance(event, CallbackQuery):
+            await event.answer("Сначала подпишись на канал.", show_alert=True)
+        return None
+
+dp.message.outer_middleware(SubscriptionMiddleware())
+dp.callback_query.outer_middleware(SubscriptionMiddleware())
 
 SPORTS_DAYS = ("Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота")
 SPORTS_SECTIONS = [
@@ -651,6 +696,10 @@ async def specialty_groups(c: CallbackQuery):
 
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
+    if not await is_subscribed(m.from_user.id):
+        await remove_old_keyboard(m)
+        await show_subscription_prompt(m)
+        return
     user = await get_user(m.from_user.id)
     role = "admin" if m.from_user.id == ADMIN_ID else (user["role"] if user else "student")
     await add_user(m.from_user.id, m.from_user.full_name, role)
@@ -667,6 +716,15 @@ async def start(m: Message, state: FSMContext):
     await remove_old_keyboard(m)
     college_id = user.get("college_id", "kuzpk")
     await m.answer(f"🎓 <b>Расписание · {college_label(college_id)}</b>\nТвоя группа: <b>{escape(str(user['group_name']))}</b>\n\nВыбери раздел ниже:", reply_markup=main_menu(role, user["group_name"], college_id))
+
+
+@dp.callback_query(F.data == "subscription|check")
+async def check_subscription(c: CallbackQuery):
+    if await is_subscribed(c.from_user.id):
+        await c.answer("Подписка подтверждена ✅")
+        await c.message.answer("✅ Отлично, подписка подтверждена! Теперь нажми /start, чтобы открыть меню.")
+    else:
+        await c.answer("Подписка не найдена. Подпишись на канал и проверь ещё раз.", show_alert=True)
 
 
 @dp.callback_query(F.data.startswith("city|"))
