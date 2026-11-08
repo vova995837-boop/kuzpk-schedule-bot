@@ -5,3 +5,6 @@ gspread==6.2.1
 google-auth==2.40.3
 APScheduler==3.11.0
 openpyxl==3.1.5
+python-docx==1.1.2
+requests==2.32.5
+beautifulsoup4==4.14.2

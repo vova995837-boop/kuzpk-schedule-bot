@@ -1,4 +1,4 @@
-import io, os, json, re, time, logging
+import io, os, json, re, time, logging, asyncio
 from datetime import date, datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
@@ -235,7 +235,14 @@ async def _values(tab):
     except Exception:
         return []
 
-async def get_groups():
+async def get_groups(college_id="kuzpk"):
+    if college_id == "pgt":
+        from pgt import get_groups as pgt_groups
+        return await pgt_groups()
+    if college_id == "kuztagis":
+        from kuztagis import get_rows
+        rows = await asyncio.to_thread(get_rows)
+        return sorted({r["group"] for r in rows if r.get("group")})
     new_rows = _new_schedule_rows()
     if new_rows:
         return sorted({str(r["group"]).strip() for r in new_rows if r.get("group")})
@@ -246,7 +253,15 @@ async def get_groups():
     found.extend(str(r.get("group", "")).strip() for r in _new_schedule_rows() if r.get("group"))
     return sorted(set(found)) or DEMO_GROUPS
 
-async def get_schedule(group, day: date):
+async def get_schedule(group, day: date, college_id="kuzpk"):
+    if college_id == "pgt":
+        from pgt import get_group_rows
+        rows = await get_group_rows(group)
+        return [r for r in rows if r.get("date") == day.isoformat()]
+    if college_id == "kuztagis":
+        from kuztagis import get_rows
+        rows = await asyncio.to_thread(get_rows)
+        return _collapse_lessons([r for r in rows if r.get("date") == day.isoformat() and r.get("group") == group])
     new_rows = _new_schedule_rows()
     if new_rows:
         return _collapse_lessons([r for r in new_rows if r["date"] == day.isoformat() and r["group"] == group])
@@ -270,10 +285,33 @@ async def get_schedule(group, day: date):
     result.extend(r for r in _new_schedule_rows() if r["date"] == day.isoformat() and r["group"] == group)
     return _collapse_lessons(result)
 
-async def get_week_schedule(group, monday: date):
+async def get_week_schedule(group, monday: date, college_id="kuzpk"):
     """Load one week's schedule in a single source read, indexed by date."""
     days = [monday + timedelta(days=offset) for offset in range(7)]
     by_day = {day: [] for day in days}
+    if college_id == "pgt":
+        from pgt import get_group_rows
+        for row in await get_group_rows(group):
+            try:
+                row_day = date.fromisoformat(row["date"])
+            except (KeyError, ValueError):
+                continue
+            if row_day in by_day:
+                by_day[row_day].append(row)
+        return by_day
+    if college_id == "kuztagis":
+        from kuztagis import get_rows
+        rows = await asyncio.to_thread(get_rows)
+        for row in rows:
+            if row.get("group") != group:
+                continue
+            try:
+                row_day = date.fromisoformat(row["date"])
+            except (KeyError, ValueError):
+                continue
+            if row_day in by_day:
+                by_day[row_day].append(row)
+        return {day: _collapse_lessons(day_rows) for day, day_rows in by_day.items()}
     new_rows = _new_schedule_rows()
     if new_rows:
         for row in new_rows:
@@ -318,7 +356,15 @@ async def get_week_schedule(group, monday: date):
             by_day[row_day].append(row)
     return {day: _collapse_lessons(day_rows) for day, day_rows in by_day.items()}
 
-async def get_teachers():
+async def get_teachers(college_id="kuzpk"):
+    if college_id == "pgt":
+        from pgt import get_entity_names
+        return [{"teacher": name} for name in await get_entity_names("teacher")]
+    if college_id == "kuztagis":
+        from kuztagis import get_rows
+        rows = await asyncio.to_thread(get_rows)
+        return [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
+                for r in rows if r.get("teacher")]
     new_rows = _new_schedule_rows()
     if new_rows:
         return [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
@@ -329,7 +375,14 @@ async def get_teachers():
     local += [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
               for r in _new_schedule_rows() if r.get("teacher")]
     return rows + local
-async def get_rooms():
+async def get_rooms(college_id="kuzpk"):
+    if college_id == "pgt":
+        from pgt import get_entity_names
+        return [{"room": name} for name in await get_entity_names("room")]
+    if college_id == "kuztagis":
+        from kuztagis import get_rows
+        rows = await asyncio.to_thread(get_rows)
+        return [{"room": room} for room in {r.get("room") for r in rows if r.get("room")}]
     new_rows = _new_schedule_rows()
     if new_rows:
         return [{"room": room} for room in {r.get("room") for r in new_rows if r.get("room")}]
@@ -337,7 +390,12 @@ async def get_rooms():
     local = [{"room": room} for room in {r.get("Аудитория") for r in _local_rows("Расписание пар") if r.get("Аудитория")}]
     local += [{"room": r["room"]} for r in _new_schedule_rows() if r.get("room")]
     return rows + local
-async def get_bells():
+async def get_bells(college_id="kuzpk"):
+    if college_id == "pgt":
+        return []
+    if college_id == "kuztagis":
+        from kuztagis import get_bells as kuztagis_bells
+        return await asyncio.to_thread(kuztagis_bells)
     rows = await _values("Звонки")
     if rows:
         return rows
@@ -390,12 +448,12 @@ def _local_bells():
     except Exception:
         return []
 
-async def get_entity_names(kind):
+async def get_entity_names(kind, college_id="kuzpk"):
     if kind == "teacher":
-        rows = await get_teachers()
+        rows = await get_teachers(college_id)
         key = "teacher"
     else:
-        rows = await get_rooms()
+        rows = await get_rooms(college_id)
         key = "room"
     names = {str(r.get(key, "")).strip() for r in rows if r.get(key)}
     if kind == "room":
@@ -410,7 +468,18 @@ def room_building(room):
         return int(value[0])
     return 0
 
-async def get_entity_schedule(kind, value, day: date):
+async def get_entity_schedule(kind, value, day: date, college_id="kuzpk"):
+    if college_id == "pgt":
+        from pgt import get_entity_rows
+        rows = await get_entity_rows(kind, value)
+        return [r for r in rows if r.get("date") == day.isoformat()]
+    if college_id == "kuztagis":
+        from kuztagis import get_rows
+        all_rows = await asyncio.to_thread(get_rows)
+        new_rows = [r for r in all_rows if r.get("date") == day.isoformat()]
+        key = "teacher" if kind == "teacher" else "room"
+        return _collapse_lessons([{k: r.get(k) for k in ("lesson_no", "lesson", "subject", "teacher", "room", "group")}
+                                  for r in new_rows if str(r.get(key, "")).strip() == value])
     new_rows = _new_schedule_rows()
     if new_rows:
         key = "teacher" if kind == "teacher" else "room"

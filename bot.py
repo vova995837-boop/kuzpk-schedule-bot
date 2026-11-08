@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from db import init_db, add_user, get_user, set_group, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements
+from db import init_db, add_user, get_user, set_group, set_college, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
@@ -47,33 +47,52 @@ def is_courses_group(group_name):
     normalized = str(group_name or "").upper().replace("–", "-").replace("—", "-").replace(" ", "")
     return "-" in normalized and len(normalized) >= 5
 
-def main_menu(role="student", group_name=None):
-    rows = [
-        [InlineKeyboardButton(text="📅 Расписание", callback_data="menu|schedule")],
-        [InlineKeyboardButton(text="📢 Объявления", callback_data="menu|announcements"), InlineKeyboardButton(text="⚙️ Моя группа", callback_data="menu|group")]
-    ]
-    if is_courses_group(group_name):
+def main_menu(role="student", group_name=None, college_id="kuzpk"):
+    rows = [[InlineKeyboardButton(text="📅 Расписание", callback_data="menu|schedule")]]
+    rows.append([InlineKeyboardButton(text="⚙️ Моя группа", callback_data="menu|group")])
+    if college_id == "kuzpk":
+        rows[-1].insert(0, InlineKeyboardButton(text="📢 Объявления", callback_data="menu|announcements"))
+    if is_courses_group(group_name) and college_id == "kuzpk":
         rows.insert(1, [InlineKeyboardButton(text="📚 Курсы", callback_data="menu|courses")])
         rows.insert(2, [InlineKeyboardButton(text="🎓 Образование", callback_data="menu|education")])
     if role in ("admin", "starosta", "teacher"):
         rows.append([InlineKeyboardButton(text="🛠 Управление", callback_data="menu|management")])
+    rows.append([InlineKeyboardButton(text="🏫 Сменить колледж", callback_data="menu|college")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def back_button(destination="home"):
     label = "🏠 Главное меню" if destination == "home" else "↩️ Назад"
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"menu|{destination}")]])
 
-def schedule_menu_keyboard():
+def schedule_menu_keyboard(college_id="kuzpk"):
     rows = [
         [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")],
         [InlineKeyboardButton(text="🔔 Звонки", callback_data="menu|bells")],
         [InlineKeyboardButton(text="👨‍🏫 Преподаватель", callback_data="menu|teachers"), InlineKeyboardButton(text="🚪 Кабинет", callback_data="menu|rooms")],
         [InlineKeyboardButton(text="🎓 Группа / специальность", callback_data="menu|group")],
-        [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education_schedule")],
-        [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
     ]
+    if college_id == "kuzpk":
+        rows.insert(-1, [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education_schedule")])
+        rows.insert(-1, [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")])
+    if college_id == "pgt":
+        rows.pop(1)  # У ПГТ на сайте не опубликовано расписание звонков.
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+COLLEGES = {"kuzpk": "КузПК", "kuztagis": "КузТАГиС", "pgt": "ПГТ им. В. П. Романова"}
+COLLEGE_CITIES = {"kuzpk": "Кемерово", "kuztagis": "Кемерово", "pgt": "Прокопьевск"}
+
+def college_label(college_id):
+    return f"{COLLEGES.get(college_id, 'КузПК')} · {COLLEGE_CITIES.get(college_id, 'Кемерово')}"
+
+def college_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🎓 КузПК · Кемерово", callback_data="college|kuzpk")],
+        [InlineKeyboardButton(text="🏫 КузТАГиС · Кемерово", callback_data="college|kuztagis")],
+        [InlineKeyboardButton(text="🏢 ПГТ им. В. П. Романова · Прокопьевск", callback_data="college|pgt")],
+        [InlineKeyboardButton(text="↩️ Главное меню", callback_data="menu|home")],
+    ])
 
 async def safe_edit(target, text, reply_markup=None):
     try:
@@ -93,18 +112,23 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
     if action == "home":
         u = await get_user(c.from_user.id)
         role = "admin" if c.from_user.id == ADMIN_ID else (u["role"] if u else "student")
-        await safe_edit(c.message, "🎓 <b>ПАРА | КузПК</b>\nВыбери раздел:", reply_markup=main_menu(role, u["group_name"] if u else None))
+        college = (u or {}).get("college_id", "kuzpk")
+        await safe_edit(c.message, f"🎓 <b>Расписание · {college_label(college)}</b>\nВыбери раздел:", reply_markup=main_menu(role, u["group_name"] if u else None, college))
+    elif action == "college":
+        await safe_edit(c.message, "🏫 <b>Выбери колледж</b>\nУ каждого колледжа своё расписание и список групп:", reply_markup=college_keyboard())
     elif action == "schedule":
-        await safe_edit(c.message, "📅 <b>Расписание</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard())
+        u = await get_user(c.from_user.id)
+        college_id = (u or {}).get("college_id", "kuzpk")
+        await safe_edit(c.message, f"📅 <b>Расписание · {college_label(college_id)}</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard(college_id))
     elif action == "courses":
         user = await get_user(c.from_user.id)
-        if not user or not is_courses_group(user.get("group_name")):
+        if not user or user.get("college_id") != "kuzpk" or not is_courses_group(user.get("group_name")):
             await c.answer("Сначала выбери свою учебную группу.", show_alert=True)
             return
         await show_moodle_courses(c.message, user.get("group_name"))
     elif action in ("education", "education_schedule"):
         user = await get_user(c.from_user.id)
-        if not user or not is_courses_group(user.get("group_name")):
+        if not user or user.get("college_id") != "kuzpk" or not is_courses_group(user.get("group_name")):
             await c.answer("Сначала выбери свою учебную группу.", show_alert=True)
             return
         await show_education_menu(
@@ -120,16 +144,29 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
         monday = today - timedelta(days=today.weekday())
         await render_schedule(c.message, c.from_user.id, monday, "w", today.weekday(), edit=True)
     elif action == "group":
-        kb = await group_keyboard()
+        user = await get_user(c.from_user.id)
+        college_id = (user or {}).get("college_id", "kuzpk")
+        kb = await group_keyboard(college_id=college_id)
         await safe_edit(c.message, "🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:", reply_markup=kb or back_button())
     elif action == "bells":
-        rows = await get_bells()
+        user = await get_user(c.from_user.id)
+        rows = await get_bells((user or {}).get("college_id", "kuzpk"))
         await safe_edit(c.message, format_bells(rows), reply_markup=back_button())
     elif action == "teachers":
-        await show_entity_picker(c.message, "teacher", 0, edit=True)
+        user = await get_user(c.from_user.id)
+        await show_entity_picker(c.message, "teacher", 0, edit=True, college_id=(user or {}).get("college_id", "kuzpk"))
     elif action == "rooms":
-        await show_building_picker(c.message, edit=True)
+        user = await get_user(c.from_user.id)
+        college_id = (user or {}).get("college_id", "kuzpk")
+        if college_id == "pgt":
+            await show_entity_picker(c.message, "room", 0, edit=True, college_id=college_id)
+        else:
+            await show_building_picker(c.message, edit=True, college_id=college_id)
     elif action == "announcements":
+        user = await get_user(c.from_user.id)
+        if (user or {}).get("college_id") != "kuzpk":
+            await c.answer("Объявления доступны только для КузПК.", show_alert=True)
+            return
         rows = await recent_announcements()
         cards = [f"📣 <b>{escape(r['group_name'] or 'Колледж')}</b> · <i>{escape(r['created_at'])}</i>\n{escape(r['body'])}" for r in rows[:5]]
         await safe_edit(c.message, "📢 <b>Последние объявления</b>\n\n" + ("\n\n──────────\n\n".join(cards) if cards else "Пока объявлений нет."), reply_markup=back_button())
@@ -198,7 +235,7 @@ async def show_education_menu(target, group_name, back_to="home"):
 async def show_education_documents(c: CallbackQuery):
     user = await get_user(c.from_user.id)
     group_name = user.get("group_name") if user else None
-    if not user or not is_courses_group(group_name):
+    if not user or user.get("college_id") != "kuzpk" or not is_courses_group(group_name):
         await c.answer("Сначала выбери свою учебную группу.", show_alert=True)
         return
     parts = c.data.split("|")
@@ -350,7 +387,7 @@ async def show_moodle_courses(target, group_name):
 async def show_course_category(c: CallbackQuery):
     user = await get_user(c.from_user.id)
     group_name = user.get("group_name") if user else None
-    if not user or not is_courses_group(group_name):
+    if not user or user.get("college_id") != "kuzpk" or not is_courses_group(group_name):
         await c.answer("Сначала выбери свою учебную группу.", show_alert=True)
         return
     try:
@@ -373,8 +410,8 @@ async def show_course_category(c: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
     await c.answer()
 
-async def show_entity_picker(target, kind: str, page: int, edit: bool = False):
-    names = await get_entity_names(kind)
+async def show_entity_picker(target, kind: str, page: int, edit: bool = False, college_id="kuzpk"):
+    names = await get_entity_names(kind, college_id)
     label = "преподавателя" if kind == "teacher" else "кабинет"
     if not names:
         text = f"Список {label}ов пуст."
@@ -403,23 +440,25 @@ async def show_entity_picker(target, kind: str, page: int, edit: bool = False):
 @dp.callback_query(F.data.startswith("pick|"))
 async def entity_picker_page(c: CallbackQuery):
     _, kind, raw_page = c.data.split("|")
-    if kind != "noop": await show_entity_picker(c.message, kind, int(raw_page), edit=True)
+    if kind != "noop":
+        user = await get_user(c.from_user.id)
+        await show_entity_picker(c.message, kind, int(raw_page), edit=True, college_id=(user or {}).get("college_id", "kuzpk"))
     await c.answer()
 
-async def render_entity_schedule(target, kind: str, index: int, day: date, edit: bool = True):
-    names = await get_entity_names(kind)
+async def render_entity_schedule(target, kind: str, index: int, day: date, edit: bool = True, college_id="kuzpk"):
+    names = await get_entity_names(kind, college_id)
     if index < 0 or index >= len(names):
         await safe_edit(target, "Список изменился. Выбери запись ещё раз.", reply_markup=back_button())
         return
     name = names[index]
-    rows = await get_entity_schedule(kind, name, day)
+    rows = await get_entity_schedule(kind, name, day, college_id)
     text = format_schedule(name, day, rows, entity_type=kind)
     picker_page = index // 8
     nav = [InlineKeyboardButton(text="‹ День", callback_data=f"entity|{kind}|{index}|{(day-timedelta(days=1)):%Y%m%d}"),
            InlineKeyboardButton(text="Сегодня", callback_data=f"entity|{kind}|{index}|{datetime.now(TZ).date():%Y%m%d}"),
            InlineKeyboardButton(text="День ›", callback_data=f"entity|{kind}|{index}|{(day+timedelta(days=1)):%Y%m%d}")]
-    return_callback = f"building|{room_building(name)}" if kind == "room" else f"pick|{kind}|{picker_page}"
-    return_label = "↩️ Корпус" if kind == "room" else "↩️ К списку"
+    return_callback = f"building|{room_building(name)}" if kind == "room" and college_id == "kuzpk" else f"pick|{kind}|{picker_page}"
+    return_label = "↩️ Корпус" if kind == "room" and college_id == "kuzpk" else "↩️ К списку"
     markup = InlineKeyboardMarkup(inline_keyboard=[nav,
         [InlineKeyboardButton(text=return_label, callback_data=return_callback), InlineKeyboardButton(text="🏠 Меню", callback_data="menu|home")]])
     if edit: await safe_edit(target, text, reply_markup=markup)
@@ -429,7 +468,8 @@ async def render_entity_schedule(target, kind: str, index: int, day: date, edit:
 async def entity_schedule_navigation(c: CallbackQuery):
     _, kind, raw_index, raw_date = c.data.split("|")
     day = datetime.strptime(raw_date, "%Y%m%d").date()
-    await render_entity_schedule(c.message, kind, int(raw_index), day)
+    user = await get_user(c.from_user.id)
+    await render_entity_schedule(c.message, kind, int(raw_index), day, college_id=(user or {}).get("college_id", "kuzpk"))
     await c.answer()
 
 def building_title(building):
@@ -437,8 +477,8 @@ def building_title(building):
               3: "3 корпус · Спортивный комплекс", 4: "4 корпус · Общежитие"}
     return titles.get(building, "Другие помещения")
 
-async def show_building_picker(target, edit=True):
-    names = await get_entity_names("room")
+async def show_building_picker(target, edit=True, college_id="kuzpk"):
+    names = await get_entity_names("room", college_id)
     buildings = sorted({room_building(name) for name in names})
     buttons = []
     for building in buildings:
@@ -450,8 +490,8 @@ async def show_building_picker(target, edit=True):
     if edit: await safe_edit(target, text, reply_markup=markup)
     else: await target.answer(text, reply_markup=markup)
 
-async def show_rooms_in_building(target, building, page=0):
-    names = await get_entity_names("room")
+async def show_rooms_in_building(target, building, page=0, college_id="kuzpk"):
+    names = await get_entity_names("room", college_id)
     filtered = [(i, name) for i, name in enumerate(names) if room_building(name) == building]
     size = 10
     pages = max(1, (len(filtered) + size - 1) // size)
@@ -471,14 +511,17 @@ async def show_rooms_in_building(target, building, page=0):
 @dp.callback_query(F.data.startswith("building|"))
 async def building_callback(c: CallbackQuery):
     value = c.data.split("|", 1)[1]
-    if value == "list": await show_building_picker(c.message)
-    else: await show_rooms_in_building(c.message, int(value))
+    user = await get_user(c.from_user.id)
+    college_id = (user or {}).get("college_id", "kuzpk")
+    if value == "list": await show_building_picker(c.message, college_id=college_id)
+    else: await show_rooms_in_building(c.message, int(value), college_id=college_id)
     await c.answer()
 
 @dp.callback_query(F.data.startswith("roomlist|"))
 async def room_list_page(c: CallbackQuery):
     _, building, page = c.data.split("|")
-    await show_rooms_in_building(c.message, int(building), int(page))
+    user = await get_user(c.from_user.id)
+    await show_rooms_in_building(c.message, int(building), int(page), (user or {}).get("college_id", "kuzpk"))
     await c.answer()
 
 @dp.callback_query(F.data.startswith("manage|"))
@@ -488,6 +531,8 @@ async def management_action(c: CallbackQuery, state: FSMContext):
         u = await get_user(c.from_user.id)
         if not u or (c.from_user.id != ADMIN_ID and u["role"] != "starosta"):
             await c.answer("Недостаточно прав.", show_alert=True); return
+        if u.get("college_id") != "kuzpk":
+            await c.answer("Рассылка объявлений подключена только для КузПК.", show_alert=True); return
         await state.set_state(Forms.announcement)
         await safe_edit(c.message, "📣 <b>Объявление группе</b>\n\nОтправь текст сообщения. Рассылка пойдёт в твою группу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")]]))
     elif action == "all":
@@ -520,15 +565,16 @@ class Forms(StatesGroup):
     role_name = State()
     admin_announcement_confirm = State()
 
-async def group_keyboard(prefix=None, page=0):
-    groups = await list_groups()
+async def group_keyboard(prefix=None, page=0, college_id="kuzpk"):
+    groups = await list_groups(college_id)
     if not groups:
         return None
     prefixes = sorted({str(g).split("-", 1)[0] for g in groups})
     if prefix is None:
         rows = [[InlineKeyboardButton(text=f"🎓 {p} · {sum(str(g).startswith(p+'-') for g in groups)} групп", callback_data=f"spec|{p}|0")]
                 for p in prefixes]
-        rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")])
+        rows.extend([[InlineKeyboardButton(text="🏫 Сменить колледж", callback_data="menu|college")],
+                     [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]])
         return InlineKeyboardMarkup(inline_keyboard=rows)
     selected = [g for g in groups if str(g).startswith(prefix + "-")]
     size = 12
@@ -549,11 +595,14 @@ async def specialty_groups(c: CallbackQuery):
     if prefix == "noop":
         await c.answer(); return
     if prefix == "list":
-        markup = await group_keyboard()
+        user = await get_user(c.from_user.id)
+        markup = await group_keyboard(college_id=(user or {}).get("college_id", "kuzpk"))
         text = "🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:"
     else:
-        markup = await group_keyboard(prefix, int(page))
-        count = sum(str(g).startswith(prefix + "-") for g in await list_groups())
+        user = await get_user(c.from_user.id)
+        college_id = (user or {}).get("college_id", "kuzpk")
+        markup = await group_keyboard(prefix, int(page), college_id)
+        count = sum(str(g).startswith(prefix + "-") for g in await list_groups(college_id))
         text = f"🎓 <b>Специальность {escape(prefix)}</b> · {count} групп\nВыбери группу:"
     await safe_edit(c.message, text, reply_markup=markup or back_button())
     await c.answer()
@@ -565,30 +614,56 @@ async def start(m: Message, state: FSMContext):
     await add_user(m.from_user.id, m.from_user.full_name, role)
     user = await get_user(m.from_user.id)
     if not user["group_name"]:
-        kb = await group_keyboard()
+        kb = college_keyboard()
         if kb:
             await remove_old_keyboard(m)
-            await m.answer("🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:", reply_markup=kb)
+            await m.answer("🏫 <b>Выбери колледж</b>\nПосле этого выбери свою учебную группу:", reply_markup=kb)
         else:
             await m.answer("Привет! Список групп пока не загружен. Администратор должен подключить расписание.", reply_markup=ReplyKeyboardRemove())
         return
     await remove_old_keyboard(m)
-    await m.answer(f"🎓 <b>ПАРА | КузПК</b>\nТвоя группа: <b>{escape(str(user['group_name']))}</b>\n\nВыбери раздел ниже:", reply_markup=main_menu(role, user["group_name"]))
+    college_id = user.get("college_id", "kuzpk")
+    await m.answer(f"🎓 <b>Расписание · {college_label(college_id)}</b>\nТвоя группа: <b>{escape(str(user['group_name']))}</b>\n\nВыбери раздел ниже:", reply_markup=main_menu(role, user["group_name"], college_id))
+
+
+@dp.callback_query(F.data.startswith("college|"))
+async def choose_college(c: CallbackQuery):
+    college_id = c.data.split("|", 1)[1]
+    if college_id not in COLLEGES:
+        await c.answer("Неизвестный колледж.", show_alert=True)
+        return
+    user = await get_user(c.from_user.id)
+    role = "admin" if c.from_user.id == ADMIN_ID else (user["role"] if user else "student")
+    await add_user(c.from_user.id, c.from_user.full_name, role)
+    await set_college(c.from_user.id, college_id)
+    await c.answer()
+    groups = await list_groups(college_id)
+    if not groups:
+        await safe_edit(c.message,
+            f"🏫 <b>{college_label(college_id)}</b>\n\nНе удалось загрузить группы. Проверь, что источник расписания доступен.",
+            reply_markup=college_keyboard())
+        return
+    markup = await group_keyboard(college_id=college_id)
+    await safe_edit(c.message,
+        f"🏫 <b>{college_label(college_id)}</b>\n\nВыбери специальность, затем свою группу:",
+        reply_markup=markup)
 
 @dp.callback_query(F.data.startswith("group:"))
 async def choose_group(c: CallbackQuery):
+    await c.answer()
     group = c.data.split(":", 1)[1]
-    if group not in await list_groups():
-        await c.answer("Этой группы нет в расписании.", show_alert=True); return
     user = await get_user(c.from_user.id)
+    college_id = (user or {}).get("college_id", "kuzpk")
+    if group not in await list_groups(college_id):
+        await c.message.answer("Этой группы нет в расписании.")
+        return
     role = "admin" if c.from_user.id == ADMIN_ID else (user["role"] if user else "student")
     # A saved inline group button can outlive the user's database row (for
     # example after a service database reset). Recreate the user before saving.
     await add_user(c.from_user.id, c.from_user.full_name, role)
     await set_group(c.from_user.id, group)
     user = await get_user(c.from_user.id)
-    await safe_edit(c.message, f"🎓 <b>Группа сохранена: {escape(group)}</b>\n\nВыбери раздел:", reply_markup=main_menu(role, user["group_name"]))
-    await c.answer()
+    await safe_edit(c.message, f"🎓 <b>Группа сохранена: {escape(group)}</b>\n\nВыбери раздел:", reply_markup=main_menu(role, user["group_name"], college_id))
 
 def schedule_keyboard(day: date, mode: str, page: int = 0):
     if mode == "w":
@@ -621,12 +696,12 @@ async def render_schedule(target, uid: int, day: date, mode: str = "d", page: in
         return
     if mode == "w":
         monday = day - timedelta(days=day.weekday())
-        schedule = await get_week_schedule(u["group_name"], monday)
-        text = format_week_schedule(u["group_name"], monday, schedule)
+        schedule = await get_week_schedule(u["group_name"], monday, u.get("college_id", "kuzpk"))
+        text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_week_schedule(u["group_name"], monday, schedule)
         markup = schedule_keyboard(monday, mode)
     else:
-        rows = await get_schedule(u["group_name"], day)
-        text = format_schedule(u["group_name"], day, rows)
+        rows = await get_schedule(u["group_name"], day, u.get("college_id", "kuzpk"))
+        text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_schedule(u["group_name"], day, rows)
         markup = schedule_keyboard(day, mode)
     if edit: await safe_edit(target, text, reply_markup=markup)
     else: await target.answer(text, reply_markup=markup)
@@ -653,7 +728,9 @@ async def schedule_navigation(c: CallbackQuery):
     if mode == "noop":
         await c.answer(); return
     if mode == "back":
-        await safe_edit(c.message, "📅 <b>Расписание</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard())
+        user = await get_user(c.from_user.id)
+        college_id = (user or {}).get("college_id", "kuzpk")
+        await safe_edit(c.message, f"📅 <b>Расписание · {college_label(college_id)}</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard(college_id))
         await c.answer(); return
     if mode == "x":
         await c.message.delete(); await c.answer(); return
@@ -663,7 +740,8 @@ async def schedule_navigation(c: CallbackQuery):
 
 @dp.message(F.text == "🔔 Звонки")
 async def bells(m: Message):
-    rows = await get_bells()
+    user = await get_user(m.from_user.id)
+    rows = await get_bells((user or {}).get("college_id", "kuzpk"))
     if not rows:
         await m.answer("Расписание звонков ещё не загружено.")
     elif rows and "text" in rows[0]:
@@ -676,17 +754,21 @@ async def bells(m: Message):
 
 @dp.message(F.text == "👨‍🏫 Преподаватели")
 async def teachers(m: Message):
-    rows = await get_teachers()
+    user = await get_user(m.from_user.id)
+    rows = await get_teachers((user or {}).get("college_id", "kuzpk"))
     await m.answer("👨‍🏫 <b>Преподаватели</b>\n\n" + ("\n".join(sorted(set(r.get("teacher","") for r in rows if r.get("teacher")))) or "Справочник пока пуст."))
 
 @dp.message(F.text == "🚪 Аудитории")
 async def rooms(m: Message):
-    rows = await get_rooms()
+    user = await get_user(m.from_user.id)
+    rows = await get_rooms((user or {}).get("college_id", "kuzpk"))
     await m.answer("🚪 <b>Аудитории</b>\n\n" + ("\n".join(sorted(set(r.get("room","") for r in rows if r.get("room")))) or "Справочник пока пуст."))
 
 @dp.message(F.text == "⚙️ Моя группа")
 async def change_group(m: Message):
-    kb = await group_keyboard()
+    user = await get_user(m.from_user.id)
+    college_id = (user or {}).get("college_id", "kuzpk")
+    kb = await group_keyboard(college_id=college_id)
     if kb: await m.answer("Выбери новую группу:", reply_markup=kb)
     else: await m.answer("Список групп пока не загружен.")
 
@@ -716,6 +798,8 @@ async def management(m: Message):
 @dp.message(F.text == "📣 Объявление группе")
 async def ask_group_announcement(m: Message, state: FSMContext):
     u = await get_user(m.from_user.id)
+    if u and u.get("college_id") != "kuzpk":
+        await m.answer("Рассылка объявлений подключена только для КузПК."); return
     if not u or (m.from_user.id != ADMIN_ID and u["role"] != "starosta"):
         await m.answer("Недостаточно прав."); return
     await state.set_state(Forms.announcement)
@@ -724,6 +808,8 @@ async def ask_group_announcement(m: Message, state: FSMContext):
 @dp.message(Forms.announcement)
 async def group_announcement(m: Message, state: FSMContext):
     u = await get_user(m.from_user.id)
+    if u and u.get("college_id") != "kuzpk":
+        await m.answer("Рассылка объявлений подключена только для КузПК."); await state.clear(); return
     if not u or (m.from_user.id != ADMIN_ID and u["role"] != "starosta"):
         await m.answer("Недостаточно прав."); await state.clear(); return
     if not u["group_name"]:
@@ -806,7 +892,7 @@ async def role_help(m: Message):
 async def back_menu(m: Message):
     u = await get_user(m.from_user.id)
     role = "admin" if m.from_user.id == ADMIN_ID else (u["role"] if u else "student")
-    await m.answer("Главное меню:", reply_markup=main_menu(role, u["group_name"] if u else None))
+    await m.answer("Главное меню:", reply_markup=main_menu(role, u["group_name"] if u else None, (u or {}).get("college_id", "kuzpk")))
 
 @dp.message(Command("help"))
 async def help_cmd(m: Message):

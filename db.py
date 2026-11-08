@@ -17,6 +17,9 @@ async def init_db():
         await db.execute("""CREATE TABLE IF NOT EXISTS announcements(
             id INTEGER PRIMARY KEY AUTOINCREMENT, telegram_id INTEGER NOT NULL,
             group_name TEXT, body TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        columns = {row[1] for row in await (await db.execute("PRAGMA table_info(users)")).fetchall()}
+        if "college_id" not in columns:
+            await db.execute("ALTER TABLE users ADD COLUMN college_id TEXT NOT NULL DEFAULT 'kuzpk'")
         await db.commit()
 
 async def add_user(uid, name, role="student"):
@@ -37,15 +40,20 @@ async def set_group(uid, group):
         await db.execute("UPDATE users SET group_name=? WHERE telegram_id=?", (group, uid))
         await db.commit()
 
+async def set_college(uid, college_id):
+    async with aiosqlite.connect(_database_path()) as db:
+        await db.execute("UPDATE users SET college_id=?, group_name=NULL WHERE telegram_id=?", (college_id, uid))
+        await db.commit()
+
 async def set_role(uid, role):
     async with aiosqlite.connect(_database_path()) as db:
         await db.execute("UPDATE users SET role=? WHERE telegram_id=?", (role, uid))
         await db.commit()
 
-async def list_groups():
+async def list_groups(college_id="kuzpk"):
     # Группы берутся из Google Sheets; fallback можно задать в .env.
     from sheets import get_groups
-    return await get_groups()
+    return await get_groups(college_id)
 
 async def users_for_group(group):
     async with aiosqlite.connect(_database_path()) as db:
