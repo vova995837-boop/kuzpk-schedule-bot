@@ -1,6 +1,9 @@
 """Public schedule reader for Yamalsky Multidisciplinary College (YAMK)."""
 
 import logging
+import base64
+import io
+import os
 import re
 import time
 from datetime import datetime
@@ -24,6 +27,144 @@ _TEACHERS = None
 _TEACHERS_UNTIL = 0.0
 _TEACHER_ROWS = {}
 _GROUPS = {}
+_DEPARTMENT_DATA = {}
+CONVERTAPI_URL = "https://v2.convertapi.com/convert/pdf/to/xlsx"
+
+
+def _convert_pdf_to_xlsx(pdf_bytes, filename):
+    """Convert a public YAMK department PDF through ConvertAPI.
+
+    The API token is read only from the hosting environment and never logged.
+    ConvertAPI's default non-stored response keeps the converted workbook out
+    of its temporary file storage.
+    """
+    token = os.getenv("CONVERTAPI_TOKEN", "").strip()
+    if not token:
+        raise RuntimeError("Для расписаний PDF добавь секрет CONVERTAPI_TOKEN в Railway Variables")
+    response = _SESSION.post(
+        CONVERTAPI_URL,
+        headers={"Authorization": f"Bearer {token}"},
+        files={"File": (filename, pdf_bytes, "application/pdf")},
+        data={"StoreFile": "false", "OcrMode": "auto", "OcrLanguage": "ru"},
+        timeout=120,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    converted = next((item for item in payload.get("Files", []) if item.get("FileData")), None)
+    if converted:
+        return base64.b64decode(converted["FileData"])
+    # Some account/API configurations return a short-lived download URL.
+    converted = next((item for item in payload.get("Files", []) if item.get("Url")), None)
+    if converted:
+        download = _SESSION.get(converted["Url"], timeout=60)
+        download.raise_for_status()
+        return download.content
+    raise ValueError("Сервис конвертации не вернул Excel-файл")
+
+
+def _cell_text(value):
+    return " ".join(str(value or "").replace("\xa0", " ").split()).strip()
+
+
+def _is_teacher(value):
+    value = _cell_text(value)
+    return bool(re.search(r"[А-ЯЁ][а-яё-]+\s+[А-ЯЁ]\.?(?:\s*[А-ЯЁ]\.)?$", value))
+
+
+def _date_value(value):
+    match = re.search(r"(\d{2})\.(\d{2})\.(\d{4})", _cell_text(value))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(".".join(match.groups()), "%d.%m.%Y").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _parse_department_xlsx(xlsx_bytes, branch):
+    """Read group columns from a converted YAMK weekly schedule workbook."""
+    import openpyxl
+
+    workbook = openpyxl.load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
+    groups, records = [], []
+    seen = set()
+    for sheet in workbook.worksheets:
+        values = list(sheet.iter_rows(values_only=True))
+        header_index = next((i for i, row in enumerate(values)
+                             if len(row) > 2 and _cell_text(row[0]).casefold() == "дни"
+                             and _cell_text(row[1]).casefold() == "время"), None)
+        if header_index is None:
+            continue
+        headers = values[header_index]
+        columns = []
+        for index in range(2, len(headers)):
+            name = _cell_text(headers[index])
+            # The department's table alternates a group column and its room.
+            if not name or name.casefold() == "кабинет":
+                continue
+            # Exclude specialty titles and unrelated headings; group headings
+            # begin with the cohort's two-digit admission year.
+            if not re.match(r"^\d{2}\s*[А-ЯЁA-Z]", name, re.IGNORECASE):
+                continue
+            key = (branch, name)
+            if key not in seen:
+                groups.append({"name": name, "id": str(len(groups) + 1), "branch": branch})
+                seen.add(key)
+            room_col = index + 1 if index + 1 < len(headers) and _cell_text(headers[index + 1]).casefold() == "кабинет" else None
+            columns.append((index, room_col, name))
+
+        current_date = None
+        last_subject = {index: "" for index, _room, _name in columns}
+        last_room = {index: "" for index, _room, _name in columns}
+        for row in values[header_index + 1:]:
+            if not row:
+                continue
+            row_date = _date_value(row[0] if len(row) else None)
+            if row_date:
+                current_date = row_date
+                last_subject = {index: "" for index, _room, _name in columns}
+                last_room = {index: "" for index, _room, _name in columns}
+            if not current_date:
+                continue
+            time_text = _cell_text(row[1] if len(row) > 1 else "")
+            time_match = re.search(r"(\d{1,2}[.:]\d{2})\s*[-–]\s*(\d{1,2}[.:]\d{2})", time_text)
+            for index, room_col, group_name in columns:
+                value = _cell_text(row[index] if len(row) > index else "")
+                room_value = _cell_text(row[room_col] if room_col is not None and len(row) > room_col else "")
+                if value and not _is_teacher(value):
+                    # Subject/course rows are followed by a teacher row.
+                    if value.casefold() not in {"поднятие флага", "разговор о важном"}:
+                        last_subject[index] = value
+                    if room_value:
+                        last_room[index] = room_value
+                    continue
+                if not value or not _is_teacher(value) or not last_subject[index]:
+                    continue
+                records.append({
+                    "date": current_date, "group": group_name,
+                    "lesson_no": len([r for r in records if r["date"] == current_date and r["group"] == group_name]) + 1,
+                    "lesson": "", "subject": last_subject[index], "teacher": value,
+                    "room": room_value or last_room[index],
+                    "start": time_match.group(1).replace(".", ":") if time_match else "",
+                    "end": time_match.group(2).replace(".", ":") if time_match else "",
+                })
+    workbook.close()
+    return groups, records
+
+
+def _department_schedule(branch):
+    if branch not in DEPARTMENTS or branch == "otp":
+        return [], []
+    cached = _DEPARTMENT_DATA.get(branch)
+    if cached and cached[0] > time.monotonic():
+        return list(cached[1]), list(cached[2])
+    pdf_bytes, filename = get_department_pdf(branch)
+    xlsx_bytes = _convert_pdf_to_xlsx(pdf_bytes, filename)
+    groups, rows = _parse_department_xlsx(xlsx_bytes, branch)
+    if not groups:
+        raise ValueError("В Excel после конвертации не удалось распознать столбцы групп")
+    _DEPARTMENT_DATA[branch] = (time.monotonic() + _CACHE_TTL, groups, rows)
+    return list(groups), list(rows)
 
 
 def _lesson_times(cells):
@@ -65,6 +206,10 @@ def get_groups(branch="otp"):
     cached = _GROUPS.get(branch)
     if cached and cached[0] > time.monotonic():
         return list(cached[1])
+    if branch != "otp":
+        groups, _rows = _department_schedule(branch)
+        _GROUPS[branch] = (time.monotonic() + _CACHE_TTL, groups)
+        return list(groups)
     response = _SESSION.post(urljoin(BASE_URL, "student/list_group.php"), data={"branch": branch}, timeout=25)
     response.raise_for_status()
     soup = BeautifulSoup(response.text, "html.parser")
@@ -73,13 +218,18 @@ def get_groups(branch="otp"):
         name = button.get("value", "").strip()
         group_id = button.get("id", "").strip()
         if name and group_id.isdigit():
-            groups.append({"name": name, "id": group_id})
+            groups.append({"name": name, "id": group_id, "branch": branch})
     _GROUPS[branch] = (time.monotonic() + _CACHE_TTL, groups)
     return list(groups)
 
 
-def get_group_schedule(group_name):
-    group = next((item for item in get_groups() if item["name"] == group_name), None)
+def get_group_schedule(group_name, branch="otp"):
+    if branch != "otp":
+        groups, rows = _department_schedule(branch)
+        if not any(item["name"] == group_name for item in groups):
+            return []
+        return [row for row in rows if row["group"] == group_name]
+    group = next((item for item in get_groups(branch) if item["name"] == group_name), None)
     if not group:
         return []
     response = _SESSION.post(urljoin(BASE_URL, "student/schedule_group.php"), data={

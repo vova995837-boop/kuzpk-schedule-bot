@@ -786,12 +786,25 @@ async def choose_college(c: CallbackQuery):
         reply_markup=markup)
 
 
-async def show_yamk_groups(target, page=0):
+async def show_yamk_groups(target, branch="otp", page=0):
     from yamk import get_groups
-    groups = await asyncio.to_thread(get_groups, "otp")
+    from yamk import DEPARTMENTS
+    try:
+        groups = await asyncio.to_thread(get_groups, branch)
+    except Exception as error:
+        logging.exception("Не удалось загрузить группы ЯМК (%s)", branch)
+        message = ("Для этого отделения сайт публикует расписание PDF. Чтобы бот разделил его по группам, "
+                   "нужен ключ сервиса конвертации в Railway Variables: CONVERTAPI_TOKEN.")
+        await safe_edit(target,
+            f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · ЯМК</b>\n\n{escape(message)}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://www.ямк-салехард.рф/")],
+                [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
+            ]))
+        return
     if not groups:
         await safe_edit(target,
-            "📚 <b>ОТП · группы</b>\n\nНа сайте ЯМК сейчас не удалось загрузить список групп.",
+            f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · группы</b>\n\nНа сайте ЯМК сейчас не удалось загрузить список групп.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://www.ямк-салехард.рф/")],
                 [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
@@ -800,26 +813,26 @@ async def show_yamk_groups(target, page=0):
     size = 12
     pages = (len(groups) + size - 1) // size
     page = max(0, min(page, pages - 1))
-    rows = [[InlineKeyboardButton(text=item["name"], callback_data=f"yamk|group|{item['name']}")]
+    rows = [[InlineKeyboardButton(text=item["name"], callback_data=f"yamk|group|{branch}|{item['name']}")]
             for item in groups[page * size:(page + 1) * size]]
     nav = []
     if page:
-        nav.append(InlineKeyboardButton(text="‹", callback_data=f"yamk|groups|{page-1}"))
+        nav.append(InlineKeyboardButton(text="‹", callback_data=f"yamk|groups|{branch}|{page-1}"))
     nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="yamk|noop"))
     if page + 1 < pages:
-        nav.append(InlineKeyboardButton(text="›", callback_data=f"yamk|groups|{page+1}"))
+        nav.append(InlineKeyboardButton(text="›", callback_data=f"yamk|groups|{branch}|{page+1}"))
     rows.extend([nav,
         [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
         [InlineKeyboardButton(text="🌐 Сайт ЯМК", url="https://www.ямк-салехард.рф/")],
     ])
     await safe_edit(target,
-        f"📚 <b>ОТП · расписание по группам</b>\n\nВыбери группу · всего {len(groups)}:",
+        f"📚 <b>{DEPARTMENTS.get(branch, ('ЯМК', ''))[0]} · расписание по группам</b>\n\nВыбери группу · всего {len(groups)}:",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 @dp.callback_query(F.data.startswith("yamk|"))
 async def yamk_action(c: CallbackQuery):
-    parts = c.data.split("|", 2)
+    parts = c.data.split("|")
     action = parts[1] if len(parts) > 1 else ""
     if action == "noop":
         await c.answer()
@@ -830,9 +843,14 @@ async def yamk_action(c: CallbackQuery):
         if branch not in DEPARTMENTS:
             await c.answer("Такое отделение не найдено.", show_alert=True)
             return
-        groups = await asyncio.to_thread(yamk_groups, branch)
+        try:
+            groups = await asyncio.to_thread(yamk_groups, branch)
+        except Exception:
+            await show_yamk_groups(c.message, branch)
+            await c.answer()
+            return
         if groups:
-            await show_yamk_groups(c.message)
+            await show_yamk_groups(c.message, branch)
             await c.answer()
             return
         label, description = DEPARTMENTS[branch]
@@ -841,7 +859,7 @@ async def yamk_action(c: CallbackQuery):
             "На сайте колледжа для этого отделения сейчас опубликовано общее расписание, "
             "без списка групп для отдельного выбора. Я не буду отправлять общий PDF вместо расписания группы.",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="📚 Группы ОТП", callback_data="yamk|groups|0")],
+                [InlineKeyboardButton(text="📚 Группы ОТП", callback_data="yamk|groups|otp|0")],
                 [InlineKeyboardButton(text="🌐 Открыть расписание ЯМК", url="https://www.ямк-салехард.рф/")],
                 [InlineKeyboardButton(text="↩️ Отделения ЯМК", callback_data="menu|home")],
             ]))
@@ -849,29 +867,25 @@ async def yamk_action(c: CallbackQuery):
         return
     if action == "groups":
         try:
-            page = int(parts[2]) if len(parts) > 2 else 0
+            branch = parts[2] if len(parts) > 2 else "otp"
+            page = int(parts[3]) if len(parts) > 3 else 0
         except ValueError:
+            branch = "otp"
             page = 0
-        await show_yamk_groups(c.message, page)
+        await show_yamk_groups(c.message, branch, page)
         await c.answer()
         return
     if action == "group":
-        group = parts[2] if len(parts) > 2 else ""
+        branch = parts[2] if len(parts) > 3 else "otp"
+        group = parts[3] if len(parts) > 3 else (parts[2] if len(parts) > 2 else "")
         from yamk import get_group_schedule, get_groups as yamk_groups
-        # Resolve the selected group against all official group lists rather
-        # than accepting arbitrary callback text.
-        valid = []
-        for branch in ("osgp", "oenp", "otp", "osep"):
-            valid.extend(await asyncio.to_thread(yamk_groups, branch))
-        selected = next((item for item in valid if item["name"] == group), None)
+        selected = next((item for item in await asyncio.to_thread(yamk_groups, branch)
+                         if item["name"] == group), None)
         if not selected:
             await c.answer("Группа не найдена в актуальном списке ЯМК.", show_alert=True)
             return
-        if selected.get("branch", "otp") != "otp":
-            await c.answer("Сайт пока не даёт расписание этой группы отдельно.", show_alert=True)
-            return
         try:
-            rows = await asyncio.to_thread(get_group_schedule, group)
+            rows = await asyncio.to_thread(get_group_schedule, group, branch)
         except Exception:
             logging.exception("Не удалось получить расписание группы ЯМК %s", group)
             rows = []
@@ -888,11 +902,12 @@ async def yamk_action(c: CallbackQuery):
                 continue
             if row_day in by_day:
                 by_day[row_day].append(row)
-        text = f"🏫 <b>ЯМК · ОТП · {escape(group)}</b>\n" + format_week_schedule(group, monday, by_day)
+        from yamk import DEPARTMENTS
+        text = f"🏫 <b>ЯМК · {DEPARTMENTS.get(branch, ('ОТП', ''))[0]} · {escape(group)}</b>\n" + format_week_schedule(group, monday, by_day)
         if not rows:
             text += "\n\nИсточник: <a href=\"https://www.ямк-салехард.рф/\">официальное расписание ЯМК</a>."
         await safe_edit(c.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="↩️ Список групп ОТП", callback_data="yamk|groups|0")],
+            [InlineKeyboardButton(text=f"↩️ Список групп {DEPARTMENTS.get(branch, ('ОТП', ''))[0]}", callback_data=f"yamk|groups|{branch}|0")],
             [InlineKeyboardButton(text="🏠 Отделения ЯМК", callback_data="menu|home")],
         ]))
         await c.answer()
