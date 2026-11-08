@@ -908,7 +908,7 @@ async def yamk_action(c: CallbackQuery):
         except ValueError:
             specialty_index = 0
         group = parts[4] if len(parts) > 4 else (parts[2] if len(parts) > 2 else "")
-        from yamk import get_group_schedule, get_groups as yamk_groups
+        from yamk import get_groups as yamk_groups
         try:
             selected = next((item for item in await asyncio.to_thread(yamk_groups, branch)
                              if item["name"] == group), None)
@@ -920,34 +920,15 @@ async def yamk_action(c: CallbackQuery):
         if not selected:
             await c.answer("Группа не найдена в актуальном списке ЯМК.", show_alert=True)
             return
-        specialties = yamk_specialties([item for item in await asyncio.to_thread(yamk_groups, branch)])
+        all_groups = await asyncio.to_thread(yamk_groups, branch)
+        specialties = yamk_specialties(all_groups)
         specialty_index = specialties.index(selected.get("specialty") or "Специальность не указана")
-        try:
-            rows = await asyncio.to_thread(get_group_schedule, group, branch)
-        except Exception:
-            logging.exception("Не удалось получить расписание группы ЯМК %s", group)
-            rows = []
-        schedule_days = sorted({date.fromisoformat(row["date"]) for row in rows if row.get("date")})
-        today = datetime.now(TZ).date()
-        monday = today - timedelta(days=today.weekday())
-        if not any(monday <= day < monday + timedelta(days=7) for day in schedule_days) and schedule_days:
-            monday = schedule_days[0] - timedelta(days=schedule_days[0].weekday())
-        by_day = {monday + timedelta(days=i): [] for i in range(7)}
-        for row in rows:
-            try:
-                row_day = date.fromisoformat(row["date"])
-            except (KeyError, ValueError):
-                continue
-            if row_day in by_day:
-                by_day[row_day].append(row)
-        from yamk import DEPARTMENTS
-        text = f"🏫 <b>ЯМК · {DEPARTMENTS.get(branch, ('ОТП', ''))[0]} · {escape(group)}</b>\n" + format_week_schedule(group, monday, by_day)
-        if not rows:
-            text += "\n\nИсточник: <a href=\"https://www.ямк-салехард.рф/\">официальное расписание ЯМК</a>."
-        await safe_edit(c.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"↩️ Группы · {escape(selected.get('specialty') or '')[:30]}", callback_data=f"yamk|groups|{branch}|{specialty_index}|0")],
-            [InlineKeyboardButton(text="🏠 Отделения ЯМК", callback_data="menu|home")],
-        ]))
+        user = await get_user(c.from_user.id)
+        role = "admin" if c.from_user.id == ADMIN_ID else (user["role"] if user else "student")
+        await add_user(c.from_user.id, c.from_user.full_name, role)
+        await set_college(c.from_user.id, "yamk")
+        await set_group(c.from_user.id, group)
+        await render_schedule(c.message, c.from_user.id, datetime.now(TZ).date(), edit=True)
         await c.answer()
         return
     if action == "teachers":
