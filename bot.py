@@ -147,12 +147,18 @@ def city_keyboard():
     ])
 
 def colleges_in_city(city):
-    return [key for key, value in COLLEGE_REGIONS.items() if value == city]
+    return [key for key, value in COLLEGE_CITIES.items() if value == city]
 
 def city_college_keyboard(city):
+    if city == "kuzbass":
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏙 Кемерово", callback_data="city|kemerovo")],
+            [InlineKeyboardButton(text="🏙 Прокопьевск", callback_data="city|prokopyevsk")],
+            [InlineKeyboardButton(text="↩️ Выбрать регион", callback_data="menu|city")],
+        ])
     rows = [[InlineKeyboardButton(text=f"🎓 {COLLEGES[key]} · {COLLEGE_CITIES[key]}", callback_data=f"college|{key}")]
             for key in colleges_in_city(city)]
-    rows.append([InlineKeyboardButton(text="↩️ Выбрать регион", callback_data="menu|city")])
+    rows.append([InlineKeyboardButton(text="↩️ Выбрать город", callback_data="city|kuzbass" if city in ("Кемерово", "Прокопьевск") else "menu|city")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -752,11 +758,18 @@ async def check_subscription(c: CallbackQuery):
 @dp.callback_query(F.data.startswith("city|"))
 async def choose_city(c: CallbackQuery):
     city = c.data.split("|", 1)[1]
-    if city not in ("kuzbass", "yanao"):
-        await c.answer("Неизвестный регион.", show_alert=True)
+    if city not in ("kuzbass", "yanao", "kemerovo", "prokopyevsk"):
+        await c.answer("Неизвестный город или регион.", show_alert=True)
         return
-    region_label = "Кузбасс · Кемерово и Прокопьевск" if city == "kuzbass" else "ЯНАО · Салехард"
-    await safe_edit(c.message, f"🗺 <b>{region_label}</b>\n\nВыбери учебное заведение:", reply_markup=city_college_keyboard(city))
+    labels = {"kuzbass": "Кузбасс", "yanao": "ЯНАО · Салехард", "kemerovo": "Кемерово", "prokopyevsk": "Прокопьевск"}
+    if city == "kemerovo":
+        city_key = "Кемерово"
+    elif city == "prokopyevsk":
+        city_key = "Прокопьевск"
+    else:
+        city_key = city
+    prompt = "Выбери город:" if city == "kuzbass" else "Выбери учебное заведение:"
+    await safe_edit(c.message, f"🗺 <b>{labels[city]}</b>\n\n{prompt}", reply_markup=city_college_keyboard(city_key))
     await c.answer()
 
 
