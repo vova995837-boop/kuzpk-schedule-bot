@@ -371,6 +371,13 @@ def parse_bells_file(content, filename, hint=""):
         workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         try:
             tables = [list(sheet.iter_rows(values_only=True)) for sheet in workbook.worksheets]
+            # This workbook has both shifts side by side and separate day-type
+            # sections; a generic row parser mixes the two columns together.
+            for sheet in workbook.worksheets:
+                if sheet.title.strip().casefold() == "расписание звонков":
+                    structured = _kuzpk_bells_workbook_rows(sheet)
+                    if structured:
+                        return structured
         finally:
             workbook.close()
     elif suffix == ".pdf":
@@ -395,6 +402,62 @@ def parse_bells_file(content, filename, hint=""):
     if "звон" in clue_text:
         return _ai_bells_rows(source_text[:14000], f"файла расписания звонков. Подпись: {hint[:500]}")
     return []
+
+
+def _kuzpk_bells_workbook_rows(sheet):
+    """Read KuzPK's two-shift, day-section bell timetable without mixing columns."""
+    raw = list(sheet.iter_rows(values_only=True))
+    weekdays = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")
+    section, rows, general_note = "", [], ""
+
+    def cell(row, index):
+        return row[index] if len(row) > index else None
+
+    def lesson_label(value):
+        text = _text(value)
+        match = re.search(r"(\d{1,2})\s*пара", text, re.I)
+        if not match:
+            return ""
+        number = match.group(1)
+        if "разговоры о важном" in text.casefold():
+            return f"Разговоры о важном · {number} пара"
+        return f"{number} пара"
+
+    def break_values(value):
+        lines = [part.strip() for part in str(value or "").splitlines() if part.strip()]
+        minutes = [part for part in lines if re.fullmatch(r"\d+|[-–—]", part)]
+        note = " ".join(part.strip("() ") for part in lines if not re.fullmatch(r"\d+|[-–—]", part))
+        return (minutes + [""])[:2], note
+
+    for row in raw:
+        values = list(row)
+        first = _text(cell(values, 0))
+        nonempty = [_text(value) for value in values if _text(value)]
+        if first.casefold().startswith("примечание:"):
+            general_note = first.split(":", 1)[-1].strip()
+            continue
+        if first and any(day in first.casefold() for day in weekdays) and len(nonempty) == 1:
+            section = first.title()
+            continue
+        if not section:
+            continue
+
+        for label_column, time_column, break_column, shift in (
+            (0, 1, 2, "1 смена"), (4, 5, 6, "2 смена"),
+        ):
+            label = lesson_label(cell(values, label_column))
+            intervals = _bell_intervals((cell(values, time_column),))
+            if not label or not intervals:
+                continue
+            breaks, note = break_values(cell(values, break_column))
+            rows.append({"section": section, "shift": shift, "lesson": label,
+                         "first": intervals[0], "break_1": breaks[0],
+                         "second": intervals[1] if len(intervals) > 1 else "",
+                         "break_2": breaks[1], "note": note})
+
+    if rows and general_note:
+        rows[-1]["general_note"] = general_note
+    return rows
 
 
 def _normalize_bell_interval(value):

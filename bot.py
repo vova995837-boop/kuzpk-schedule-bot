@@ -705,8 +705,9 @@ def schedule_college_keyboard():
 
 def _bells_preview(rows, college_id, source):
     shifts = sorted({str(row.get("shift") or "Смена не указана") for row in rows})
+    sections = list(dict.fromkeys(str(row.get("section") or "") for row in rows if row.get("section")))
     sample = "\n".join(
-        f"• {escape(str(row.get('shift') or ''))}, {escape(str(row.get('lesson') or 'пара'))}: "
+        f"• {escape(str(row.get('section') or ''))} · {escape(str(row.get('shift') or ''))}, {escape(str(row.get('lesson') or 'пара'))}: "
         f"{escape(str(row.get('first') or ''))}"
         + (f"; {escape(str(row.get('second')))}" if row.get("second") else "")
         for row in rows[:8])
@@ -714,7 +715,8 @@ def _bells_preview(rows, college_id, source):
         sample += f"\n… и ещё {len(rows) - 8} пар"
     text = (f"🔔 <b>Предпросмотр звонков · {escape(COLLEGES[college_id])}</b>\n\n"
             f"Файл: <code>{escape(source[:100])}</code>\n"
-            f"Распознано пар: <b>{len(rows)}</b> · смены: <b>{escape(', '.join(shifts))}</b>\n\n"
+            f"Распознано временных слотов: <b>{len(rows)}</b> · смены: <b>{escape(', '.join(shifts))}</b>\n"
+            f"Дни: {escape(', '.join(sections))}\n\n"
             f"{sample}\n\nПодтвердить замену расписания звонков для этого колледжа?")
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Обновить звонки", callback_data="scheduleimport|confirm|yes"),

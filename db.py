@@ -38,6 +38,21 @@ async def init_db():
             college_id TEXT PRIMARY KEY, rows_json TEXT NOT NULL,
             source_file TEXT NOT NULL DEFAULT '', updated_by INTEGER,
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS data_migrations(
+            name TEXT PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        migration_name = "kuzpk_bells_2026_2027"
+        applied = await (await db.execute("SELECT 1 FROM data_migrations WHERE name=?", (migration_name,))).fetchone()
+        bundled_bells = Path(__file__).resolve().parent / "data" / "kuzpk_bells_2026_2027.json"
+        if not applied and bundled_bells.exists():
+            rows = json.loads(bundled_bells.read_text(encoding="utf-8"))
+            if isinstance(rows, list) and len(rows) >= 20:
+                await db.execute("""INSERT INTO bell_schedule_overrides
+                    (college_id,rows_json,source_file,updated_by,updated_at)
+                    VALUES('kuzpk',?,?,NULL,CURRENT_TIMESTAMP)
+                    ON CONFLICT(college_id) DO UPDATE SET rows_json=excluded.rows_json,
+                    source_file=excluded.source_file,updated_by=NULL,updated_at=CURRENT_TIMESTAMP""",
+                    (json.dumps(rows, ensure_ascii=False), "Расписание_звонков_КузПК_2026-2027.xlsx"))
+                await db.execute("INSERT INTO data_migrations(name) VALUES(?)", (migration_name,))
         await db.commit()
 
 async def add_user(uid, name, role="student"):
