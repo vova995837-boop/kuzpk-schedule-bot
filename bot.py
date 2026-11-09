@@ -18,7 +18,7 @@ from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_college_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
 from education import list_documents, download_document, EducationError, EDUCATION_URL, PLANS_URL
-from schedule_imports import parse_schedule_file, parse_bells_file, parse_bells_image, parse_bells_text, detect_college, apply_file_instruction, identify_text_target, interpret_text_instruction
+from schedule_imports import parse_schedule_file, parse_bells_file, analyze_schedule_image, parse_bells_text, detect_college, apply_file_instruction, identify_text_target, interpret_text_instruction
 
 load_dotenv()
 TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -742,6 +742,70 @@ async def _route_bells_preview(message, state, rows, source, hint=""):
     await _show_bells_preview(message, state, rows, college_id, source)
 
 
+def _image_kind_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🗓 Занятия", callback_data="scheduleimage|lessons"),
+         InlineKeyboardButton(text="🔔 Звонки", callback_data="scheduleimage|bells")],
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")]])
+
+
+async def _process_schedule_image(message, state, file_id, mime_type, source, hint="", expected_kind=""):
+    await state.update_data(pending_image_file_id=file_id, pending_image_mime=mime_type,
+                            pending_image_source=source, pending_image_hint=hint,
+                            pending_image_kind=expected_kind)
+    downloaded = await bot.download(file_id)
+    result = await asyncio.to_thread(analyze_schedule_image, downloaded.getvalue(), mime_type,
+                                     hint, expected_kind)
+    kind, rows = result.get("kind"), result.get("rows") or []
+    if kind == "unknown":
+        await state.set_state(Forms.schedule_update_waiting)
+        await message.answer(result.get("question") or "Уточни, что на фото:", reply_markup=_image_kind_keyboard())
+        return
+    if not rows:
+        await state.set_state(Forms.schedule_update_waiting)
+        await state.update_data(pending_image_kind=kind)
+        await message.answer(result.get("question") or "Не смог уверенно разобрать фото. Напиши дату и группу или уточни, что именно нужно прочитать.")
+        return
+    await state.update_data(pending_image_file_id="", pending_image_kind="")
+    data = await state.get_data()
+    college_id = data.get("schedule_input_college") or detect_college(f"{source} {hint}")
+    if kind == "bells":
+        if college_id not in COLLEGES:
+            await state.update_data(pending_schedule_kind="bells", pending_bells_rows=rows,
+                                    pending_schedule_source=source)
+            await state.set_state(Forms.schedule_update_waiting)
+            await message.answer("🔔 Распознал расписание звонков. Выбери колледж для обновления:", reply_markup=schedule_college_keyboard())
+            return
+        await _show_bells_preview(message, state, rows, college_id, source)
+        return
+    if college_id not in COLLEGES:
+        await state.update_data(pending_schedule_kind="lessons", pending_schedule_rows=rows,
+                                pending_schedule_source=source, pending_schedule_summary="")
+        await state.set_state(Forms.schedule_update_waiting)
+        await message.answer("🗓 Распознал расписание занятий. Выбери колледж для обновления:", reply_markup=schedule_college_keyboard())
+        return
+    await _show_schedule_preview(message, state, rows, college_id, source)
+
+
+@dp.callback_query(F.data.startswith("scheduleimage|"))
+async def schedule_image_kind(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        await c.answer("Недостаточно прав.", show_alert=True); return
+    kind = c.data.rsplit("|", 1)[1]
+    data = await state.get_data()
+    file_id = data.get("pending_image_file_id")
+    if kind not in {"lessons", "bells"} or not file_id:
+        await c.answer("Фото устарело. Отправь его ещё раз.", show_alert=True); return
+    await c.answer()
+    try:
+        hint = data.get("pending_image_hint", "")
+        await _process_schedule_image(c.message, state, file_id, data.get("pending_image_mime", "image/jpeg"),
+                                      data.get("pending_image_source", "Фото расписания"), hint, kind)
+    except Exception as exc:
+        logging.exception("Не удалось обработать фото после уточнения типа")
+        await c.message.answer("Не получилось разобрать фото. Проверь модель распознавания изображений в Railway и отправь более чёткий снимок. " + escape(str(exc)))
+
+
 def _schedule_preview(rows, college_id, source, summary="", replace_days=None):
     groups = sorted({str(row.get("group", "")).strip() for row in rows if row.get("group")})
     dates = sorted({str(row.get("date", "")).strip() for row in rows if row.get("date")})
@@ -853,9 +917,14 @@ async def admin_schedule_file(m: Message, state: FSMContext):
     try:
         downloaded = await bot.download(m.document.file_id)
         content = downloaded.getvalue()
-        if (m.document.mime_type or "").startswith("image/"):
-            bell_rows = await asyncio.to_thread(parse_bells_image, content, m.document.mime_type, m.caption or "")
-            await _route_bells_preview(m, state, bell_rows, filename, m.caption or "")
+        image_mimes = {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+                       ".webp": "image/webp", ".gif": "image/gif"}
+        image_mime = (m.document.mime_type or "").casefold()
+        if not image_mime.startswith("image/"):
+            image_mime = image_mimes.get(os.path.splitext(filename)[1].casefold(), "")
+        if image_mime.startswith("image/"):
+            await _process_schedule_image(m, state, m.document.file_id, image_mime,
+                                          filename, m.caption or "")
             return
         bell_rows = await asyncio.to_thread(parse_bells_file, content, filename, m.caption or "")
         data = await state.get_data()
@@ -897,12 +966,11 @@ async def admin_schedule_photo(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         return
     try:
-        downloaded = await bot.download(m.photo[-1].file_id)
-        rows = await asyncio.to_thread(parse_bells_image, downloaded.getvalue(), "image/jpeg", m.caption or "")
-        await _route_bells_preview(m, state, rows, "Фото расписания звонков", m.caption or "")
+        await _process_schedule_image(m, state, m.photo[-1].file_id, "image/jpeg",
+                                      "Фото расписания", m.caption or "")
     except Exception as exc:
-        logging.exception("Не удалось прочитать расписание звонков с фото")
-        await m.answer("Не получилось прочитать фото расписания звонков. Пришли снимок целиком, без бликов и размытия, или отправь Excel/PDF. " + escape(str(exc)))
+        logging.exception("Не удалось определить и прочитать расписание с фото")
+        await m.answer("Не получилось определить расписание на фото. Проверь модель распознавания изображений в Railway и пришли снимок целиком, без бликов и размытия. " + escape(str(exc)))
 
 
 @dp.message(Forms.schedule_update_waiting, F.text)
@@ -910,6 +978,19 @@ async def admin_schedule_text(m: Message, state: FSMContext):
     if m.from_user.id != ADMIN_ID:
         return
     data = await state.get_data()
+    if data.get("pending_image_file_id"):
+        text_kind = "bells" if "звон" in m.text.casefold() else (
+            "lessons" if any(word in m.text.casefold() for word in ("занят", "групп", "предмет", "пары")) else "")
+        try:
+            await _process_schedule_image(m, state, data["pending_image_file_id"],
+                                          data.get("pending_image_mime", "image/jpeg"),
+                                          data.get("pending_image_source", "Фото расписания"),
+                                          f"{data.get('pending_image_hint', '')}\nУточнение администратора: {m.text}",
+                                          data.get("pending_image_kind") or text_kind)
+        except Exception as exc:
+            logging.exception("Не удалось обработать фото после текстового уточнения")
+            await m.answer("Не получилось разобрать фото с учётом уточнения. Проверь модель распознавания изображений в Railway или отправь более чёткий снимок. " + escape(str(exc)))
+        return
     college_id = data.get("schedule_input_college")
     if college_id not in COLLEGES:
         await m.answer("Сначала выбери колледж:", reply_markup=schedule_college_keyboard()); return
