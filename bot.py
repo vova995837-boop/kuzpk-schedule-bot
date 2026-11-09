@@ -13,11 +13,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements
+from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements, save_schedule_update, schedule_override_groups
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_college_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
 from education import list_documents, download_document, EducationError, EDUCATION_URL, PLANS_URL
+from schedule_imports import parse_schedule_file, detect_college, apply_file_instruction, identify_text_target, interpret_text_instruction
 
 load_dotenv()
 TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -59,6 +60,8 @@ class SubscriptionMiddleware(BaseMiddleware):
     async def __call__(self, handler, event, data):
         user = getattr(event, "from_user", None)
         if user is None:
+            return await handler(event, data)
+        if user.id == ADMIN_ID:
             return await handler(event, data)
         if isinstance(event, Message) and event.text and event.text.split() and event.text.split()[0].split("@")[0] == "/start":
             return await handler(event, data)
@@ -271,6 +274,7 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
         rows = [[InlineKeyboardButton(text="📣 Объявление группе", callback_data="manage|group")]]
         if c.from_user.id == ADMIN_ID:
             rows += [[InlineKeyboardButton(text="📊 Пользователи", callback_data="manage|stats")]]
+            rows += [[InlineKeyboardButton(text="🤖 ИИ · обновить расписание", callback_data="manage|schedule_update")]]
             rows += [[InlineKeyboardButton(text=f"📢 Объявление · {college_name}", callback_data=f"manage|college:{key}")]
                      for key, college_name in COLLEGES.items()]
             rows += [
@@ -643,6 +647,12 @@ async def management_action(c: CallbackQuery, state: FSMContext):
             await c.answer("Недостаточно прав.", show_alert=True); return
         await state.set_state(Forms.announcement)
         await safe_edit(c.message, "📣 <b>Объявление группе</b>\n\nОтправь текст сообщения. Рассылка пойдёт в твою группу.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")]]))
+    elif action == "schedule_update":
+        if c.from_user.id != ADMIN_ID:
+            await c.answer("Недостаточно прав.", show_alert=True); return
+        await state.clear()
+        await state.set_state(Forms.schedule_update_waiting)
+        await safe_edit(c.message, "🤖 <b>Обновление расписания</b>\n\nВыбери колледж. Затем отправь Excel/PDF с расписанием или текстовую правку. Я покажу предпросмотр и дождусь подтверждения.", reply_markup=schedule_college_keyboard())
     elif action.startswith("college:"):
         if c.from_user.id != ADMIN_ID:
             await c.answer("Недостаточно прав.", show_alert=True); return
@@ -682,6 +692,168 @@ class Forms(StatesGroup):
     role_user_id = State()
     role_name = State()
     admin_announcement_confirm = State()
+    schedule_update_waiting = State()
+    schedule_update_confirm = State()
+
+
+def schedule_college_keyboard():
+    rows = [[InlineKeyboardButton(text=name, callback_data=f"scheduleimport|college|{key}")]
+            for key, name in COLLEGES.items()]
+    rows.append([InlineKeyboardButton(text="❌ Отмена", callback_data="flow|cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _schedule_preview(rows, college_id, source, summary="", replace_days=None):
+    groups = sorted({str(row.get("group", "")).strip() for row in rows if row.get("group")})
+    dates = sorted({str(row.get("date", "")).strip() for row in rows if row.get("date")})
+    dates = sorted(set(dates) | {str(day) for _group, day in (replace_days or [])})
+    date_span = dates[0] if len(dates) == 1 else (f"{dates[0]} — {dates[-1]}" if dates else "даты не найдены")
+    group_preview = ", ".join(escape(name) for name in groups[:15])
+    if len(groups) > 15:
+        group_preview += f" и ещё {len(groups) - 15}"
+    text = (f"📋 <b>Предпросмотр расписания · {escape(COLLEGES[college_id])}</b>\n\n"
+            f"Файл: <code>{escape(source[:100])}</code>\n"
+            f"Занятий: <b>{len(rows)}</b>\nДаты: <b>{escape(date_span)}</b>\n"
+            f"Группы ({len(groups)}): {group_preview or 'не найдены'}")
+    if summary:
+        text += f"\n\n🤖 {escape(summary[:800])}"
+    text += "\n\nПодтвердить замену расписания для этих групп и дат?"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Применить", callback_data="scheduleimport|confirm|yes"),
+         InlineKeyboardButton(text="❌ Отменить", callback_data="scheduleimport|confirm|no")]])
+    return text, keyboard
+
+
+async def _show_schedule_preview(message, state, rows, college_id, source, summary="", branch="", replace_days=None):
+    text, keyboard = _schedule_preview(rows, college_id, source, summary, replace_days)
+    await state.update_data(pending_schedule_rows=rows, pending_schedule_college=college_id,
+                            pending_schedule_source=source, pending_schedule_branch=branch,
+                            pending_schedule_replace_days=replace_days or [])
+    await state.set_state(Forms.schedule_update_confirm)
+    await message.answer(text, reply_markup=keyboard)
+
+
+@dp.callback_query(F.data.startswith("scheduleimport|college|"))
+async def schedule_import_college(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        await c.answer("Недостаточно прав.", show_alert=True); return
+    college_id = c.data.rsplit("|", 1)[1]
+    if college_id not in COLLEGES:
+        await c.answer("Неизвестный колледж.", show_alert=True); return
+    data = await state.get_data()
+    await state.update_data(schedule_input_college=college_id)
+    rows = data.get("pending_schedule_rows")
+    if rows:
+        await _show_schedule_preview(c.message, state, rows, college_id,
+                                     data.get("pending_schedule_source", "Загруженный файл"),
+                                     data.get("pending_schedule_summary", ""))
+    else:
+        await state.set_state(Forms.schedule_update_waiting)
+        await c.message.answer(f"Выбран {escape(COLLEGES[college_id])}. Теперь отправь файл расписания или напиши правку с группой и датой.")
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("scheduleimport|confirm|"))
+async def schedule_import_confirm(c: CallbackQuery, state: FSMContext):
+    if c.from_user.id != ADMIN_ID:
+        await c.answer("Недостаточно прав.", show_alert=True); return
+    if c.data.endswith("|no"):
+        await state.clear()
+        await safe_edit(c.message, "Изменения отменены.", reply_markup=back_button("management"))
+        await c.answer(); return
+    data = await state.get_data()
+    rows = data.get("pending_schedule_rows") or []
+    college_id = data.get("pending_schedule_college")
+    if (not rows and not data.get("pending_schedule_replace_days")) or college_id not in COLLEGES:
+        await state.clear()
+        await safe_edit(c.message, "Предпросмотр устарел. Начни обновление ещё раз.", reply_markup=back_button("management"))
+        await c.answer(); return
+    try:
+        count = await save_schedule_update(college_id, rows, data.get("pending_schedule_source", ""),
+                                          c.from_user.id, data.get("pending_schedule_branch", ""),
+                                          data.get("pending_schedule_replace_days", []))
+    except Exception as exc:
+        logging.exception("Не удалось сохранить обновление расписания")
+        await c.answer("Не удалось сохранить расписание.", show_alert=True)
+        await c.message.answer(escape(str(exc)))
+        return
+    await state.clear()
+    await safe_edit(c.message, f"✅ Расписание обновлено. Заменено {len(rows)} занятий в {count} днях для {escape(COLLEGES[college_id])}.", reply_markup=back_button("management"))
+    await c.answer("Готово")
+
+
+@dp.message(F.document)
+async def admin_schedule_file(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    filename = m.document.file_name or "расписание.xlsx"
+    if m.document.file_size and m.document.file_size > 12 * 1024 * 1024:
+        await m.answer("Файл больше 12 МБ. Отправь уменьшенную версию."); return
+    try:
+        downloaded = await bot.download(m.document.file_id)
+        content = downloaded.getvalue()
+        rows = await asyncio.to_thread(parse_schedule_file, content, filename)
+        caption = m.caption or ""
+        summary = ""
+        if any(word in caption.casefold() for word in ("замени", "исправь", "добавь", "убери", "отмени", "перенеси")):
+            rows, summary = await asyncio.to_thread(apply_file_instruction, rows, caption, "расписание колледжа")
+    except Exception as exc:
+        logging.exception("Не удалось обработать файл расписания")
+        await m.answer(f"Не получилось разобрать файл: {escape(str(exc))}"); return
+    data = await state.get_data()
+    college_id = data.get("schedule_input_college") or detect_college(f"{filename} {m.caption or ''}")
+    if college_id not in COLLEGES:
+        await state.update_data(pending_schedule_rows=rows, pending_schedule_source=filename,
+                                pending_schedule_summary=summary)
+        await state.set_state(Forms.schedule_update_waiting)
+        await m.answer("Файл разобран. Выбери колледж, к которому относится расписание:", reply_markup=schedule_college_keyboard())
+        return
+    await _show_schedule_preview(m, state, rows, college_id, filename, summary)
+
+
+@dp.message(Forms.schedule_update_waiting, F.text)
+async def admin_schedule_text(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    data = await state.get_data()
+    college_id = data.get("schedule_input_college")
+    if college_id not in COLLEGES:
+        await m.answer("Сначала выбери колледж:", reply_markup=schedule_college_keyboard()); return
+    try:
+        today = datetime.now(TZ).date()
+        target = await asyncio.to_thread(identify_text_target, m.text, COLLEGES[college_id], today.isoformat())
+        if target.get("question"):
+            await m.answer(escape(target["question"])); return
+        group, target_date = target["group"], date.fromisoformat(target["date"])
+        known_groups = await list_groups(college_id)
+        if known_groups and group.casefold() not in {str(item).casefold() for item in known_groups}:
+            await m.answer(f"Не нашёл группу «{escape(group)}» в {escape(COLLEGES[college_id])}. Проверь её написание или сначала загрузи расписание этой группы.")
+            return
+        branch = None
+        if college_id == "yamk":
+            from yamk import get_groups as yamk_groups
+            for candidate in ("osgp", "oenp", "otp", "osep"):
+                branch_groups = await asyncio.to_thread(yamk_groups, candidate)
+                if any(str(item.get("name", "")).casefold() == group.casefold() for item in branch_groups):
+                    branch = candidate; break
+        current = await get_schedule(group, target_date, college_id, branch)
+        if not current:
+            await m.answer("Для этой группы и даты пока нет расписания. Сначала отправь файл с расписанием, затем пришли текстовую правку.")
+            return
+        result = await asyncio.to_thread(interpret_text_instruction, m.text, COLLEGES[college_id], today.isoformat(), current)
+        if result.get("question"):
+            await m.answer(escape(result["question"])); return
+        if result["group"].casefold() != group.casefold() or result["date"] != target_date.isoformat():
+            await m.answer("ИИ определил другую группу или дату. Изменения не применены; напиши группу и дату точнее."); return
+        for row in result["rows"]:
+            row["group"] = group
+            row["date"] = target_date.isoformat()
+        await _show_schedule_preview(m, state, result["rows"], college_id,
+                                     f"Правка от {m.from_user.full_name}", result.get("summary", ""), branch or "",
+                                     [(group, target_date.isoformat())])
+    except Exception as exc:
+        logging.exception("Не удалось подготовить правку расписания")
+        await m.answer(f"Не удалось подготовить изменение: {escape(str(exc))}")
 
 async def group_keyboard(prefix=None, page=0, college_id="kuzpk"):
     groups = await list_groups(college_id)
@@ -814,11 +986,23 @@ def yamk_specialties(groups):
     return sorted({item.get("specialty") or "Специальность не указана" for item in groups})
 
 
-async def show_yamk_specialties(target, branch="otp"):
+async def _yamk_groups_with_import(branch):
     from yamk import get_groups
-    from yamk import DEPARTMENTS
     try:
         groups = await asyncio.to_thread(get_groups, branch)
+    except Exception:
+        groups = []
+    known = {str(item.get("name", "")).casefold() for item in groups}
+    imported = await schedule_override_groups("yamk", branch)
+    groups.extend({"name": name, "specialty": "Загруженное расписание"}
+                  for name in imported if name.casefold() not in known)
+    return groups
+
+
+async def show_yamk_specialties(target, branch="otp"):
+    from yamk import DEPARTMENTS
+    try:
+        groups = await _yamk_groups_with_import(branch)
     except Exception as error:
         logging.exception("Не удалось загрузить группы ЯМК (%s)", branch)
         message = ("Не удалось загрузить расписание с сайта ЯМК. Попробуй ещё раз позже "
@@ -854,9 +1038,9 @@ async def show_yamk_specialties(target, branch="otp"):
 
 
 async def show_yamk_groups(target, branch="otp", specialty_index=0, page=0):
-    from yamk import get_groups, DEPARTMENTS
+    from yamk import DEPARTMENTS
     try:
-        groups = await asyncio.to_thread(get_groups, branch)
+        groups = await _yamk_groups_with_import(branch)
     except Exception:
         await show_yamk_specialties(target, branch)
         return
@@ -1044,9 +1228,8 @@ async def yamk_action(c: CallbackQuery):
         except ValueError:
             specialty_index = 0
         group = parts[4] if len(parts) > 4 else (parts[2] if len(parts) > 2 else "")
-        from yamk import get_groups as yamk_groups
         try:
-            selected = next((item for item in await asyncio.to_thread(yamk_groups, branch)
+            selected = next((item for item in await _yamk_groups_with_import(branch)
                              if item["name"] == group), None)
         except Exception:
             logging.exception("Не удалось проверить список групп ЯМК (%s)", branch)
@@ -1056,7 +1239,7 @@ async def yamk_action(c: CallbackQuery):
         if not selected:
             await c.answer("Группа не найдена в актуальном списке ЯМК.", show_alert=True)
             return
-        all_groups = await asyncio.to_thread(yamk_groups, branch)
+        all_groups = await _yamk_groups_with_import(branch)
         specialties = yamk_specialties(all_groups)
         specialty_index = specialties.index(selected.get("specialty") or "Специальность не указана")
         user = await get_user(c.from_user.id)
@@ -1259,6 +1442,7 @@ async def management(m: Message):
     buttons = [[InlineKeyboardButton(text="📣 Объявление группе", callback_data="manage|group")]]
     if m.from_user.id == ADMIN_ID:
         buttons.append([InlineKeyboardButton(text="📊 Пользователи", callback_data="manage|stats")])
+        buttons.append([InlineKeyboardButton(text="🤖 ИИ · обновить расписание", callback_data="manage|schedule_update")])
         for college_id, college_name in COLLEGES.items():
             buttons.append([InlineKeyboardButton(text=f"📢 Объявление · {college_name}", callback_data=f"manage|college:{college_id}")])
         buttons.append([InlineKeyboardButton(text="📢 Объявление всем колледжам", callback_data="manage|all")])

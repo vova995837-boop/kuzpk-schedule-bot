@@ -1,4 +1,4 @@
-import aiosqlite, os
+import aiosqlite, json, os
 from pathlib import Path
 
 
@@ -28,6 +28,12 @@ async def init_db():
         announcement_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(announcements)")).fetchall()}
         if "college_id" not in announcement_columns:
             await db.execute("ALTER TABLE announcements ADD COLUMN college_id TEXT NOT NULL DEFAULT 'kuzpk'")
+        await db.execute("""CREATE TABLE IF NOT EXISTS schedule_override_days(
+            college_id TEXT NOT NULL, college_branch TEXT NOT NULL DEFAULT '',
+            group_name TEXT NOT NULL, schedule_date TEXT NOT NULL,
+            rows_json TEXT NOT NULL, source_file TEXT NOT NULL DEFAULT '',
+            updated_by INTEGER, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(college_id, college_branch, group_name, schedule_date))""")
         await db.commit()
 
 async def add_user(uid, name, role="student"):
@@ -96,3 +102,58 @@ async def recent_announcements(limit=10, college_id="kuzpk"):
         db.row_factory = aiosqlite.Row
         cur = await db.execute("SELECT group_name,body,created_at FROM announcements WHERE college_id IN (?, 'all') ORDER BY id DESC LIMIT ?", (college_id, limit))
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def save_schedule_update(college_id, rows, source_file, updated_by, college_branch="", replace_days=None):
+    """Replace imported schedule entries by college, group, and day."""
+    buckets = {}
+    for row in rows:
+        group = str(row.get("group") or "").strip()
+        schedule_date = str(row.get("date") or "").strip()
+        if not group or not schedule_date:
+            continue
+        buckets.setdefault((group, schedule_date), []).append(row)
+    for group, schedule_date in replace_days or []:
+        if group and schedule_date:
+            buckets.setdefault((str(group).strip(), str(schedule_date).strip()), [])
+    if not buckets:
+        raise ValueError("В файле не нашлось расписания с группами и датами.")
+    async with aiosqlite.connect(_database_path()) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        for (group, schedule_date), day_rows in buckets.items():
+            await db.execute("""INSERT INTO schedule_override_days
+                (college_id,college_branch,group_name,schedule_date,rows_json,source_file,updated_by,updated_at)
+                VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
+                ON CONFLICT(college_id,college_branch,group_name,schedule_date) DO UPDATE SET
+                rows_json=excluded.rows_json,source_file=excluded.source_file,
+                updated_by=excluded.updated_by,updated_at=CURRENT_TIMESTAMP""",
+                (college_id, college_branch or "", group, schedule_date,
+                 json.dumps(day_rows, ensure_ascii=False), source_file, updated_by))
+        await db.commit()
+    return len(buckets)
+
+
+async def get_schedule_override(college_id, group_name, schedule_date, college_branch=""):
+    async with aiosqlite.connect(_database_path()) as db:
+        cur = await db.execute("""SELECT rows_json FROM schedule_override_days
+            WHERE college_id=? AND college_branch IN (?, '') AND group_name=? AND schedule_date=?
+            ORDER BY CASE WHEN college_branch=? THEN 0 ELSE 1 END LIMIT 1""",
+            (college_id, college_branch or "", group_name, schedule_date, college_branch or ""))
+        row = await cur.fetchone()
+    return json.loads(row[0]) if row else None
+
+
+async def get_schedule_overrides(college_id, start_date, end_date, college_branch=""):
+    async with aiosqlite.connect(_database_path()) as db:
+        cur = await db.execute("""SELECT group_name,schedule_date,rows_json FROM schedule_override_days
+            WHERE college_id=? AND college_branch IN (?, '') AND schedule_date>=? AND schedule_date<=?
+            ORDER BY CASE WHEN college_branch='' THEN 0 ELSE 1 END""",
+            (college_id, college_branch or "", start_date, end_date))
+        return {(r[0], r[1]): json.loads(r[2]) for r in await cur.fetchall()}
+
+
+async def schedule_override_groups(college_id, college_branch=""):
+    async with aiosqlite.connect(_database_path()) as db:
+        cur = await db.execute("SELECT DISTINCT group_name FROM schedule_override_days WHERE college_id=? AND college_branch IN (?, '')",
+                               (college_id, college_branch or ""))
+        return [row[0] for row in await cur.fetchall()]
