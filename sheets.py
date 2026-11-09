@@ -436,6 +436,13 @@ async def get_rooms(college_id="kuzpk", college_branch=None):
     local += [{"room": r["room"]} for r in _new_schedule_rows() if r.get("room")]
     return rows + local
 async def get_bells(college_id="kuzpk"):
+    try:
+        from db import get_bells_override
+        override = await get_bells_override(college_id)
+        if override:
+            return override
+    except Exception as exc:
+        logging.warning("Не удалось загрузить сохранённое расписание звонков: %s", exc)
     if college_id == "pgt":
         return []
     if college_id == "kuztagis":

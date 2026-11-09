@@ -34,6 +34,10 @@ async def init_db():
             rows_json TEXT NOT NULL, source_file TEXT NOT NULL DEFAULT '',
             updated_by INTEGER, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY(college_id, college_branch, group_name, schedule_date))""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS bell_schedule_overrides(
+            college_id TEXT PRIMARY KEY, rows_json TEXT NOT NULL,
+            source_file TEXT NOT NULL DEFAULT '', updated_by INTEGER,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         await db.commit()
 
 async def add_user(uid, name, role="student"):
@@ -188,3 +192,24 @@ async def schedule_override_groups(college_id, college_branch=""):
         cur = await db.execute("SELECT DISTINCT group_name FROM schedule_override_days WHERE college_id=? AND college_branch IN (?, '')",
                                (college_id, college_branch or ""))
         return [row[0] for row in await cur.fetchall()]
+
+
+async def save_bells_update(college_id, rows, source_file, updated_by):
+    if not rows:
+        raise ValueError("В файле не нашлось времени звонков.")
+    async with aiosqlite.connect(_database_path()) as db:
+        await db.execute("""INSERT INTO bell_schedule_overrides
+            (college_id,rows_json,source_file,updated_by,updated_at)
+            VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+            ON CONFLICT(college_id) DO UPDATE SET rows_json=excluded.rows_json,
+            source_file=excluded.source_file,updated_by=excluded.updated_by,
+            updated_at=CURRENT_TIMESTAMP""",
+            (college_id, json.dumps(rows, ensure_ascii=False), source_file, updated_by))
+        await db.commit()
+
+
+async def get_bells_override(college_id):
+    async with aiosqlite.connect(_database_path()) as db:
+        cur = await db.execute("SELECT rows_json FROM bell_schedule_overrides WHERE college_id=?", (college_id,))
+        row = await cur.fetchone()
+    return json.loads(row[0]) if row else None

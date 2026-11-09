@@ -13,12 +13,12 @@ from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements, save_schedule_update, schedule_override_groups
+from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements, save_schedule_update, save_bells_update, schedule_override_groups
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_college_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
 from education import list_documents, download_document, EducationError, EDUCATION_URL, PLANS_URL
-from schedule_imports import parse_schedule_file, detect_college, apply_file_instruction, identify_text_target, interpret_text_instruction
+from schedule_imports import parse_schedule_file, parse_bells_file, parse_bells_text, detect_college, apply_file_instruction, identify_text_target, interpret_text_instruction
 
 load_dotenv()
 TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -652,7 +652,7 @@ async def management_action(c: CallbackQuery, state: FSMContext):
             await c.answer("Недостаточно прав.", show_alert=True); return
         await state.clear()
         await state.set_state(Forms.schedule_update_waiting)
-        await safe_edit(c.message, "🤖 <b>Обновление расписания</b>\n\nВыбери колледж. Затем отправь Excel/PDF с расписанием или текстовую правку. Я покажу предпросмотр и дождусь подтверждения.", reply_markup=schedule_college_keyboard())
+        await safe_edit(c.message, "🤖 <b>Обновление расписания</b>\n\nВыбери колледж, затем отправь Excel/PDF. Я сам определю, это расписание групп или звонков, покажу понятный предпросмотр и попрошу подтверждение. Можно прислать время звонков списком в сообщении.", reply_markup=schedule_college_keyboard())
     elif action.startswith("college:"):
         if c.from_user.id != ADMIN_ID:
             await c.answer("Недостаточно прав.", show_alert=True); return
@@ -703,6 +703,33 @@ def schedule_college_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _bells_preview(rows, college_id, source):
+    shifts = sorted({str(row.get("shift") or "Смена не указана") for row in rows})
+    sample = "\n".join(
+        f"• {escape(str(row.get('shift') or ''))}, {escape(str(row.get('lesson') or 'пара'))}: "
+        f"{escape(str(row.get('first') or ''))}"
+        + (f"; {escape(str(row.get('second')))}" if row.get("second") else "")
+        for row in rows[:8])
+    if len(rows) > 8:
+        sample += f"\n… и ещё {len(rows) - 8} пар"
+    text = (f"🔔 <b>Предпросмотр звонков · {escape(COLLEGES[college_id])}</b>\n\n"
+            f"Файл: <code>{escape(source[:100])}</code>\n"
+            f"Распознано пар: <b>{len(rows)}</b> · смены: <b>{escape(', '.join(shifts))}</b>\n\n"
+            f"{sample}\n\nПодтвердить замену расписания звонков для этого колледжа?")
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Обновить звонки", callback_data="scheduleimport|confirm|yes"),
+         InlineKeyboardButton(text="❌ Отменить", callback_data="scheduleimport|confirm|no")]])
+    return text, keyboard
+
+
+async def _show_bells_preview(message, state, rows, college_id, source):
+    text, keyboard = _bells_preview(rows, college_id, source)
+    await state.update_data(pending_schedule_kind="bells", pending_bells_rows=rows,
+                            pending_schedule_college=college_id, pending_schedule_source=source)
+    await state.set_state(Forms.schedule_update_confirm)
+    await message.answer(text, reply_markup=keyboard)
+
+
 def _schedule_preview(rows, college_id, source, summary="", replace_days=None):
     groups = sorted({str(row.get("group", "")).strip() for row in rows if row.get("group")})
     dates = sorted({str(row.get("date", "")).strip() for row in rows if row.get("date")})
@@ -728,7 +755,8 @@ async def _show_schedule_preview(message, state, rows, college_id, source, summa
     text, keyboard = _schedule_preview(rows, college_id, source, summary, replace_days)
     await state.update_data(pending_schedule_rows=rows, pending_schedule_college=college_id,
                             pending_schedule_source=source, pending_schedule_branch=branch,
-                            pending_schedule_replace_days=replace_days or [])
+                            pending_schedule_replace_days=replace_days or [], pending_schedule_kind="lessons",
+                            pending_bells_rows=[])
     await state.set_state(Forms.schedule_update_confirm)
     await message.answer(text, reply_markup=keyboard)
 
@@ -742,6 +770,10 @@ async def schedule_import_college(c: CallbackQuery, state: FSMContext):
         await c.answer("Неизвестный колледж.", show_alert=True); return
     data = await state.get_data()
     await state.update_data(schedule_input_college=college_id)
+    if data.get("pending_schedule_kind") == "bells" and data.get("pending_bells_rows"):
+        await _show_bells_preview(c.message, state, data["pending_bells_rows"], college_id,
+                                  data.get("pending_schedule_source", "Загруженный файл"))
+        await c.answer(); return
     rows = data.get("pending_schedule_rows")
     if rows:
         await _show_schedule_preview(c.message, state, rows, college_id,
@@ -762,6 +794,23 @@ async def schedule_import_confirm(c: CallbackQuery, state: FSMContext):
         await safe_edit(c.message, "Изменения отменены.", reply_markup=back_button("management"))
         await c.answer(); return
     data = await state.get_data()
+    if data.get("pending_schedule_kind") == "bells":
+        college_id = data.get("pending_schedule_college")
+        rows = data.get("pending_bells_rows") or []
+        if college_id not in COLLEGES or not rows:
+            await state.clear()
+            await safe_edit(c.message, "Предпросмотр звонков устарел. Начни обновление ещё раз.", reply_markup=back_button("management"))
+            await c.answer(); return
+        try:
+            await save_bells_update(college_id, rows, data.get("pending_schedule_source", ""), c.from_user.id)
+        except Exception as exc:
+            logging.exception("Не удалось сохранить расписание звонков")
+            await c.answer("Не удалось сохранить звонки.", show_alert=True)
+            await c.message.answer(escape(str(exc)))
+            return
+        await state.clear()
+        await safe_edit(c.message, f"✅ Расписание звонков обновлено ({len(rows)} пар) · {escape(COLLEGES[college_id])}.", reply_markup=back_button("management"))
+        await c.answer("Готово"); return
     rows = data.get("pending_schedule_rows") or []
     college_id = data.get("pending_schedule_college")
     if (not rows and not data.get("pending_schedule_replace_days")) or college_id not in COLLEGES:
@@ -792,6 +841,18 @@ async def admin_schedule_file(m: Message, state: FSMContext):
     try:
         downloaded = await bot.download(m.document.file_id)
         content = downloaded.getvalue()
+        bell_rows = await asyncio.to_thread(parse_bells_file, content, filename, m.caption or "")
+        data = await state.get_data()
+        college_id = data.get("schedule_input_college") or detect_college(f"{filename} {m.caption or ''}")
+        if bell_rows:
+            if college_id not in COLLEGES:
+                await state.update_data(pending_schedule_kind="bells", pending_bells_rows=bell_rows,
+                                        pending_schedule_source=filename)
+                await state.set_state(Forms.schedule_update_waiting)
+                await m.answer("🔔 Понял: это расписание звонков. Выбери колледж, для которого его обновить:", reply_markup=schedule_college_keyboard())
+                return
+            await _show_bells_preview(m, state, bell_rows, college_id, filename)
+            return
         rows = await asyncio.to_thread(parse_schedule_file, content, filename)
         caption = m.caption or ""
         summary = ""
@@ -799,6 +860,10 @@ async def admin_schedule_file(m: Message, state: FSMContext):
             rows, summary = await asyncio.to_thread(apply_file_instruction, rows, caption, "расписание колледжа")
     except Exception as exc:
         logging.exception("Не удалось обработать файл расписания")
+        hint = f"{filename} {m.caption or ''}".casefold()
+        if "звон" in hint:
+            await m.answer("🔔 Понял, что это новое расписание звонков, но не смог извлечь пары и времена. Пришли Excel/PDF с номером пары и временем начала/окончания; если таблица необычная, добавь в подпись «это расписание звонков». Ошибка: " + escape(str(exc)))
+            return
         await m.answer(f"Не получилось разобрать файл: {escape(str(exc))}"); return
     data = await state.get_data()
     college_id = data.get("schedule_input_college") or detect_college(f"{filename} {m.caption or ''}")
@@ -820,6 +885,13 @@ async def admin_schedule_text(m: Message, state: FSMContext):
     if college_id not in COLLEGES:
         await m.answer("Сначала выбери колледж:", reply_markup=schedule_college_keyboard()); return
     try:
+        bell_rows = await asyncio.to_thread(parse_bells_text, m.text)
+        if bell_rows:
+            await _show_bells_preview(m, state, bell_rows, college_id, "Расписание звонков из сообщения")
+            return
+        if "звон" in m.text.casefold():
+            await m.answer("Похоже, ты про звонки. Пришли файл Excel/PDF или напиши пары построчно, например: «1 пара — 08:30–09:15», «2 пара — 09:25–10:10». Я покажу предпросмотр перед сохранением.")
+            return
         today = datetime.now(TZ).date()
         target = await asyncio.to_thread(identify_text_target, m.text, COLLEGES[college_id], today.isoformat())
         if target.get("question"):
