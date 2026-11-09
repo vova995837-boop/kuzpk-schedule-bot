@@ -926,9 +926,13 @@ async def admin_schedule_file(m: Message, state: FSMContext):
             await _process_schedule_image(m, state, m.document.file_id, image_mime,
                                           filename, m.caption or "")
             return
-        bell_rows = await asyncio.to_thread(parse_bells_file, content, filename, m.caption or "")
         data = await state.get_data()
         college_id = data.get("schedule_input_college") or detect_college(f"{filename} {m.caption or ''}")
+
+        # The bell parser now requires a clear “звонки” clue in the filename,
+        # caption, or workbook text, so it cannot mistake numeric lesson cells
+        # for times.
+        bell_rows = await asyncio.to_thread(parse_bells_file, content, filename, m.caption or "")
         if bell_rows:
             if college_id not in COLLEGES:
                 await state.update_data(pending_schedule_kind="bells", pending_bells_rows=bell_rows,

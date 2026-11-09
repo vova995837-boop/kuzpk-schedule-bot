@@ -361,7 +361,7 @@ def _bell_table_rows(table):
 
 
 def parse_bells_file(content, filename, hint=""):
-    """Parse bell schedules without requiring group/date/subject columns."""
+    """Parse bell schedules only when their source explicitly identifies them as bells."""
     if not content or len(content) > MAX_IMPORT_BYTES:
         raise ValueError("Файл пустой или больше 12 МБ.")
     suffix = os.path.splitext(filename or "")[1].casefold()
@@ -380,14 +380,19 @@ def parse_bells_file(content, filename, hint=""):
     else:
         return []
     rows = []
+    source_text = "\n".join(" | ".join(_text(cell) for cell in row)
+                            for table in tables for row in table)
+    # Class timetables also contain pair numbers, lesson numbers and numeric
+    # values that resemble times. Never infer a bell schedule from those alone.
+    clue_text = f"{filename or ''} {hint or ''} {source_text[:12000]}".casefold()
+    if not re.search(r"звон", clue_text):
+        return []
     for table in tables:
         rows.extend(_bell_table_rows(table))
     # Only classify a document as bell times when at least two lessons were read.
     if len(rows) >= 2:
         return rows
-    source_text = "\n".join(" | ".join(_text(cell) for cell in row) for table in tables for row in table)
-    clue_text = f"{filename or ''} {hint or ''} {source_text}".casefold()
-    if ("звон" in clue_text or ("смен" in clue_text and "пар" in clue_text and _TIME_RE.search(source_text))):
+    if "звон" in clue_text:
         return _ai_bells_rows(source_text[:14000], f"файла расписания звонков. Подпись: {hint[:500]}")
     return []
 
