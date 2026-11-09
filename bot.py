@@ -18,7 +18,7 @@ from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_college_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
 from education import list_documents, download_document, EducationError, EDUCATION_URL, PLANS_URL
-from schedule_imports import parse_schedule_file, parse_bells_file, parse_bells_text, detect_college, apply_file_instruction, identify_text_target, interpret_text_instruction
+from schedule_imports import parse_schedule_file, parse_bells_file, parse_bells_image, parse_bells_text, detect_college, apply_file_instruction, identify_text_target, interpret_text_instruction
 
 load_dotenv()
 TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
@@ -652,7 +652,7 @@ async def management_action(c: CallbackQuery, state: FSMContext):
             await c.answer("Недостаточно прав.", show_alert=True); return
         await state.clear()
         await state.set_state(Forms.schedule_update_waiting)
-        await safe_edit(c.message, "🤖 <b>Обновление расписания</b>\n\nВыбери колледж, затем отправь Excel/PDF. Я сам определю, это расписание групп или звонков, покажу понятный предпросмотр и попрошу подтверждение. Можно прислать время звонков списком в сообщении.", reply_markup=schedule_college_keyboard())
+        await safe_edit(c.message, "🤖 <b>Обновление расписания</b>\n\nВыбери колледж, затем отправь Excel/PDF или фото расписания. Я сам определю, это расписание групп или звонков, покажу предпросмотр и попрошу подтверждение. Время звонков можно прислать списком в сообщении.", reply_markup=schedule_college_keyboard())
     elif action.startswith("college:"):
         if c.from_user.id != ADMIN_ID:
             await c.answer("Недостаточно прав.", show_alert=True); return
@@ -728,6 +728,18 @@ async def _show_bells_preview(message, state, rows, college_id, source):
                             pending_schedule_college=college_id, pending_schedule_source=source)
     await state.set_state(Forms.schedule_update_confirm)
     await message.answer(text, reply_markup=keyboard)
+
+
+async def _route_bells_preview(message, state, rows, source, hint=""):
+    data = await state.get_data()
+    college_id = data.get("schedule_input_college") or detect_college(f"{source} {hint}")
+    if college_id not in COLLEGES:
+        await state.update_data(pending_schedule_kind="bells", pending_bells_rows=rows,
+                                pending_schedule_source=source)
+        await state.set_state(Forms.schedule_update_waiting)
+        await message.answer("🔔 Понял: это расписание звонков. Выбери колледж, для которого его обновить:", reply_markup=schedule_college_keyboard())
+        return
+    await _show_bells_preview(message, state, rows, college_id, source)
 
 
 def _schedule_preview(rows, college_id, source, summary="", replace_days=None):
@@ -841,6 +853,10 @@ async def admin_schedule_file(m: Message, state: FSMContext):
     try:
         downloaded = await bot.download(m.document.file_id)
         content = downloaded.getvalue()
+        if (m.document.mime_type or "").startswith("image/"):
+            bell_rows = await asyncio.to_thread(parse_bells_image, content, m.document.mime_type, m.caption or "")
+            await _route_bells_preview(m, state, bell_rows, filename, m.caption or "")
+            return
         bell_rows = await asyncio.to_thread(parse_bells_file, content, filename, m.caption or "")
         data = await state.get_data()
         college_id = data.get("schedule_input_college") or detect_college(f"{filename} {m.caption or ''}")
@@ -874,6 +890,19 @@ async def admin_schedule_file(m: Message, state: FSMContext):
         await m.answer("Файл разобран. Выбери колледж, к которому относится расписание:", reply_markup=schedule_college_keyboard())
         return
     await _show_schedule_preview(m, state, rows, college_id, filename, summary)
+
+
+@dp.message(F.photo)
+async def admin_schedule_photo(m: Message, state: FSMContext):
+    if m.from_user.id != ADMIN_ID:
+        return
+    try:
+        downloaded = await bot.download(m.photo[-1].file_id)
+        rows = await asyncio.to_thread(parse_bells_image, downloaded.getvalue(), "image/jpeg", m.caption or "")
+        await _route_bells_preview(m, state, rows, "Фото расписания звонков", m.caption or "")
+    except Exception as exc:
+        logging.exception("Не удалось прочитать расписание звонков с фото")
+        await m.answer("Не получилось прочитать фото расписания звонков. Пришли снимок целиком, без бликов и размытия, или отправь Excel/PDF. " + escape(str(exc)))
 
 
 @dp.message(Forms.schedule_update_waiting, F.text)
