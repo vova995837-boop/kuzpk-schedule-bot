@@ -68,7 +68,7 @@ def format_week_schedule(group, monday, schedule_by_day):
             return text
     return "Расписание слишком объёмное для одного сообщения."
 
-def format_bells(rows):
+def format_bells(rows, day=None):
     if not rows:
         return "🔔 <b>Расписание звонков</b>\n\n<i>Данные пока не загружены.</i>"
     if "text" in rows[0]:
@@ -79,12 +79,44 @@ def format_bells(rows):
         for r in rows:
             cards.append(f"<b>{escape(str(r.get('day_type', '')))} · {escape(str(r.get('lesson', '')))}</b>\n<blockquote>🕒 {escape(str(r.get('start', '')))}–{escape(str(r.get('end', '')))}</blockquote>")
         return "🔔 <b>Расписание звонков</b>\n\n" + "\n\n".join(cards)
-    out = ["🔔 <b>РАСПИСАНИЕ ЗВОНКОВ</b>"]
+    all_rows = rows
+    general_note = next((row.get("general_note") for row in reversed(all_rows) if row.get("general_note")), "")
+    if day is not None:
+        weekday = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")[day.weekday()]
+        aliases = {
+            "понедельник": ("понедельник",),
+            "вторник": ("вторник, четверг", "вторник"),
+            "среда": ("среда, пятница", "среда"),
+            "четверг": ("вторник, четверг", "четверг"),
+            "пятница": ("среда, пятница", "пятница"),
+            "суббота": ("суббота",),
+            "воскресенье": ("воскресенье",),
+        }
+        matches = aliases[weekday]
+        rows = [row for row in all_rows
+                if any(alias in str(row.get("section", "")).casefold() for alias in matches)]
+        title = f"🔔 <b>Звонки · {weekday.capitalize()}, {day:%d.%m.%Y}</b>"
+    else:
+        title = "🔔 <b>Полное расписание звонков</b>"
+
+    def pair_number(row):
+        import re
+        match = re.search(r"\d+", str(row.get("lesson", "")))
+        return int(match.group()) if match else 999
+
+    section_order = {section: index for index, section in enumerate(
+        dict.fromkeys(str(row.get("section", "")) for row in all_rows))}
+    rows = sorted(rows, key=lambda row: (section_order.get(str(row.get("section", "")), 999), pair_number(row),
+                                         str(row.get("shift", "")).casefold()))
+    if not rows:
+        return title + "\n\n<i>На этот день звонков нет.</i>"
+
+    out = [title]
     section = None
     for row in rows:
         if row.get("section") != section:
             section = row.get("section")
-            out.append(f"\n<b>🗓 {escape(str(section))}</b>")
+            out.append(f"<b>🗓 {escape(str(section))}</b>")
         details = [f"🕘 {escape(str(row.get('first', '—')))}"]
         if row.get("second") and row["second"] != "—":
             details.append(f"🕙 {escape(str(row['second']))}")
@@ -92,9 +124,8 @@ def format_bells(rows):
         if breaks: details.append("☕ Перемены: " + " / ".join(escape(x) for x in breaks))
         if row.get("note"): details.append("ℹ️ " + escape(str(row["note"])))
         out.append(f"<b>{escape(str(row.get('lesson', 'Пара')))} · {escape(str(row.get('shift', '')))}</b>\n<blockquote>" + "\n".join(details) + "</blockquote>")
-    note = rows[-1].get("general_note")
-    if note: out.append("\n<i>ℹ️ " + escape(str(note)) + "</i>")
-    return "\n".join(out)
+    if general_note: out.append("<i>ℹ️ " + escape(str(general_note)) + "</i>")
+    return "\n\n".join(out)
 
 async def send_group_announcement(bot, group, text, college_id="kuzpk"):
     ids = await users_for_group(group, college_id)

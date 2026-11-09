@@ -247,8 +247,8 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
         await safe_edit(c.message, "🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:", reply_markup=kb or back_button())
     elif action == "bells":
         user = await get_user(c.from_user.id)
-        rows = await get_bells((user or {}).get("college_id", "kuzpk"))
-        await safe_edit(c.message, format_bells(rows), reply_markup=back_button())
+        await show_bells_schedule(c.message, (user or {}).get("college_id", "kuzpk"),
+                                  datetime.now(TZ).date(), full=False, edit=True)
     elif action == "teachers":
         user = await get_user(c.from_user.id)
         await show_entity_picker(c.message, "teacher", 0, edit=True, college_id=(user or {}).get("college_id", "kuzpk"), college_branch=(user or {}).get("college_branch"))
@@ -722,6 +722,71 @@ def _bells_preview(rows, college_id, source):
         [InlineKeyboardButton(text="✅ Обновить звонки", callback_data="scheduleimport|confirm|yes"),
          InlineKeyboardButton(text="❌ Отменить", callback_data="scheduleimport|confirm|no")]])
     return text, keyboard
+
+
+def bells_keyboard(day, full=False):
+    keyboard = [
+        [InlineKeyboardButton(text="‹ День", callback_data=f"bell|prev|{day:%Y%m%d}"),
+         InlineKeyboardButton(text=f"{day:%d.%m}", callback_data="bell|noop|00000000"),
+         InlineKeyboardButton(text="День ›", callback_data=f"bell|next|{day:%Y%m%d}")],
+        [InlineKeyboardButton(text="📅 По расписанию", callback_data=f"bell|day|{day:%Y%m%d}" if full else "bell|full|" + day.strftime("%Y%m%d"))],
+        [InlineKeyboardButton(text="↩️ К разделу расписания", callback_data="menu|schedule")],
+    ]
+    if not full:
+        keyboard[1][0] = InlineKeyboardButton(text="📖 Показать полностью", callback_data=f"bell|full|{day:%Y%m%d}")
+    return InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+def _message_chunks(text, limit=3900):
+    paragraphs = text.split("\n\n")
+    chunks, current = [], ""
+    for paragraph in paragraphs:
+        candidate = f"{current}\n\n{paragraph}" if current else paragraph
+        if len(candidate) > limit and current:
+            chunks.append(current)
+            current = paragraph
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+async def show_bells_schedule(target, college_id, day, full=False, edit=False):
+    rows = await get_bells(college_id)
+    text = format_bells(rows, None if full else day)
+    chunks = _message_chunks(text)
+    markup = bells_keyboard(day, full)
+    if edit:
+        await safe_edit(target, chunks[0], reply_markup=markup)
+    else:
+        await target.answer(chunks[0], reply_markup=markup)
+    for chunk in chunks[1:]:
+        await target.answer(chunk)
+
+
+@dp.callback_query(F.data.startswith("bell|"))
+async def bells_navigation(c: CallbackQuery):
+    _, action, raw_day = c.data.split("|")
+    if action == "noop":
+        await c.answer(); return
+    user = await get_user(c.from_user.id)
+    college_id = (user or {}).get("college_id", "kuzpk")
+    day = datetime.strptime(raw_day, "%Y%m%d").date()
+    if action == "prev":
+        day -= timedelta(days=1)
+        full = False
+    elif action == "next":
+        day += timedelta(days=1)
+        full = False
+    elif action == "full":
+        full = True
+    elif action == "day":
+        full = False
+    else:
+        await c.answer("Кнопка устарела. Открой звонки ещё раз.", show_alert=True); return
+    await show_bells_schedule(c.message, college_id, day, full=full, edit=True)
+    await c.answer()
 
 
 async def _show_bells_preview(message, state, rows, college_id, source):
@@ -1581,16 +1646,7 @@ async def schedule_navigation(c: CallbackQuery):
 @dp.message(F.text == "🔔 Звонки")
 async def bells(m: Message):
     user = await get_user(m.from_user.id)
-    rows = await get_bells((user or {}).get("college_id", "kuzpk"))
-    if not rows:
-        await m.answer("Расписание звонков ещё не загружено.")
-    elif rows and "text" in rows[0]:
-        await m.answer("🔔 <b>Расписание звонков</b>\n\n" + "\n".join(escape(r["text"]) for r in rows))
-    else:
-        text = "🔔 <b>Расписание звонков</b>\n\n" + "\n".join(
-            f"{r.get('day_type','')}: {r.get('lesson','')} — {r.get('start','')}–{r.get('end','')}"
-            for r in rows)
-        await m.answer(text)
+    await show_bells_schedule(m, (user or {}).get("college_id", "kuzpk"), datetime.now(TZ).date())
 
 @dp.message(F.text == "👨‍🏫 Преподаватели")
 async def teachers(m: Message):
