@@ -120,6 +120,8 @@ def _xlsx_rows(content, filename):
     workbook = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     try:
         rows = _unified_rows(workbook) or _header_rows(workbook)
+        if not rows:
+            rows = _weekly_matrix_rows(workbook)
     finally:
         workbook.close()
     if rows:
@@ -131,6 +133,62 @@ def _xlsx_rows(content, filename):
         return _parse_workbook(content, filename)
     except Exception:
         return []
+
+
+def _weekly_matrix_rows(workbook):
+    """Parse the college's weekly matrix with merged day headers and paired lesson rows."""
+    ws = next((sheet for sheet in workbook.worksheets if sheet.title == "Текущее расписание"), None)
+    if ws is None:
+        return []
+    raw = list(ws.iter_rows(values_only=True))
+    header_index = next((i for i, row in enumerate(raw[:20])
+                         if sum(bool(re.search(r"\d{2}\.\d{2}\.\d{4}", str(value or ""))) for value in row) >= 2), None)
+    if header_index is None:
+        return []
+    headers = raw[header_index]
+    day_blocks = []
+    for base in range(5, len(headers), 5):
+        match = re.search(r"(\d{2}\.\d{2}\.\d{4})", str(headers[base] or ""))
+        if match:
+            try:
+                day_blocks.append((base, datetime.strptime(match.group(1), "%d.%m.%Y").date()))
+            except ValueError:
+                continue
+    if not day_blocks:
+        return []
+
+    owner_header = _text(raw[header_index][0] if raw[header_index] else "").casefold()
+    view = "teacher" if "преподав" in owner_header else "group"
+    output = []
+    owner = ""
+    for index in range(header_index + 5, len(raw) - 1):
+        row, following = raw[index], raw[index + 1]
+        first = _text(row[0] if row else None)
+        if first and first.casefold() not in {"преподаватель", "отде- ление, группа", "отделение, группа"}:
+            owner = first
+        try:
+            pair = int(_text(row[1] if len(row) > 1 else None))
+            int(_text(row[2] if len(row) > 2 else None))  # validate the lesson slot
+        except (TypeError, ValueError):
+            continue
+        if pair < 1 or not owner:
+            continue
+        for base, schedule_date in day_blocks:
+            subject_columns = (base, base + 2) if view == "group" else (base,)
+            for subject_column in subject_columns:
+                subject = _text(row[subject_column] if len(row) > subject_column else None)
+                if not subject:
+                    continue
+                related = _text(following[subject_column] if len(following) > subject_column else None)
+                room = _text(row[base + 3] if len(row) > base + 3 else None)
+                group, teacher = (owner, related) if view == "group" else (related, owner)
+                if not group:
+                    continue
+                output.append({"date": schedule_date.isoformat(), "group": group,
+                               "lesson_no": str(pair), "lesson": "",
+                               "subject": subject, "teacher": teacher, "room": room,
+                               "start": "", "end": ""})
+    return _collapse(output)
 
 
 def _pdf_rows(content):

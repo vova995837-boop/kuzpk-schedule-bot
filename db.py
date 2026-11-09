@@ -121,6 +121,37 @@ async def save_schedule_update(college_id, rows, source_file, updated_by, colleg
     async with aiosqlite.connect(_database_path()) as db:
         await db.execute("BEGIN IMMEDIATE")
         for (group, schedule_date), day_rows in buckets.items():
+            if "преподавател" in str(source_file or "").casefold() or "teacher" in str(source_file or "").casefold():
+                cur = await db.execute("""SELECT rows_json FROM schedule_override_days
+                    WHERE college_id=? AND college_branch=? AND group_name=? AND schedule_date=?""",
+                    (college_id, college_branch or "", group, schedule_date))
+                existing = await cur.fetchone()
+                if existing:
+                    merged = json.loads(existing[0])
+                    by_pair = {str(row.get("lesson_no") or ""): row for row in merged}
+
+                    def combine(first, second):
+                        values = []
+                        for value in (first, second):
+                            for part in str(value or "").split(" / "):
+                                part = part.strip()
+                                if part and part not in values:
+                                    values.append(part)
+                        return " / ".join(values)
+
+                    for incoming in day_rows:
+                        key = str(incoming.get("lesson_no") or "")
+                        previous = by_pair.get(key)
+                        if previous is None:
+                            merged.append(incoming)
+                            by_pair[key] = incoming
+                            continue
+                        for field in ("subject", "teacher", "room"):
+                            previous[field] = combine(previous.get(field), incoming.get(field))
+                        for field in ("lesson", "start", "end"):
+                            if incoming.get(field) and not previous.get(field):
+                                previous[field] = incoming[field]
+                    day_rows = merged
             await db.execute("""INSERT INTO schedule_override_days
                 (college_id,college_branch,group_name,schedule_date,rows_json,source_file,updated_by,updated_at)
                 VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)
