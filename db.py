@@ -40,6 +40,31 @@ async def init_db():
             updated_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
         await db.execute("""CREATE TABLE IF NOT EXISTS data_migrations(
             name TEXT PRIMARY KEY, applied_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS user_settings(
+            telegram_id INTEGER PRIMARY KEY,
+            hidden_menu TEXT NOT NULL DEFAULT '[]',
+            notifications_enabled INTEGER NOT NULL DEFAULT 1,
+            schedule_changes INTEGER NOT NULL DEFAULT 1,
+            cancellations INTEGER NOT NULL DEFAULT 1,
+            transfers INTEGER NOT NULL DEFAULT 1,
+            teacher_changes INTEGER NOT NULL DEFAULT 1,
+            sports_reminders INTEGER NOT NULL DEFAULT 0,
+            class_bells INTEGER NOT NULL DEFAULT 0,
+            bell_shift TEXT NOT NULL DEFAULT '1',
+            FOREIGN KEY(telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE)""")
+        setting_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(user_settings)")).fetchall()}
+        if "bell_shift" not in setting_columns:
+            await db.execute("ALTER TABLE user_settings ADD COLUMN bell_shift TEXT NOT NULL DEFAULT '1'")
+        await db.execute("INSERT OR IGNORE INTO user_settings(telegram_id) SELECT telegram_id FROM users")
+        await db.execute("""CREATE TABLE IF NOT EXISTS sports_subscriptions(
+            telegram_id INTEGER NOT NULL, section_id TEXT NOT NULL,
+            PRIMARY KEY(telegram_id,section_id))""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS notification_ledger(
+            notification_key TEXT PRIMARY KEY, created_at TEXT DEFAULT CURRENT_TIMESTAMP)""")
+        await db.execute("""CREATE TABLE IF NOT EXISTS auto_schedule_snapshots(
+            college_id TEXT NOT NULL, group_name TEXT NOT NULL, schedule_date TEXT NOT NULL,
+            rows_json TEXT NOT NULL, updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY(college_id,group_name,schedule_date))""")
         migration_name = "kuzpk_bells_2026_2027"
         applied = await (await db.execute("SELECT 1 FROM data_migrations WHERE name=?", (migration_name,))).fetchone()
         bundled_bells = Path(__file__).resolve().parent / "data" / "kuzpk_bells_2026_2027.json"
@@ -59,6 +84,7 @@ async def add_user(uid, name, role="student"):
     async with aiosqlite.connect(_database_path()) as db:
         await db.execute("INSERT INTO users(telegram_id,full_name,role) VALUES(?,?,?) ON CONFLICT(telegram_id) DO UPDATE SET full_name=excluded.full_name",
                          (uid, name, role))
+        await db.execute("INSERT OR IGNORE INTO user_settings(telegram_id) VALUES(?)", (uid,))
         await db.commit()
 
 async def get_user(uid):
@@ -110,6 +136,128 @@ async def all_users():
     async with aiosqlite.connect(_database_path()) as db:
         cur = await db.execute("SELECT telegram_id FROM users")
         return [r[0] for r in await cur.fetchall()]
+
+
+DEFAULT_USER_SETTINGS = {
+    "hidden_menu": [], "notifications_enabled": 1, "schedule_changes": 1,
+    "cancellations": 1, "transfers": 1, "teacher_changes": 1,
+    "sports_reminders": 0, "class_bells": 0, "bell_shift": "1",
+}
+
+
+async def get_user_settings(uid):
+    async with aiosqlite.connect(_database_path()) as db:
+        row = await (await db.execute("SELECT * FROM user_settings WHERE telegram_id=?", (uid,))).fetchone()
+    if not row:
+        return dict(DEFAULT_USER_SETTINGS)
+    names = ["telegram_id", "hidden_menu", "notifications_enabled", "schedule_changes",
+             "cancellations", "transfers", "teacher_changes", "sports_reminders", "class_bells", "bell_shift"]
+    values = dict(zip(names, row))
+    try:
+        values["hidden_menu"] = json.loads(values["hidden_menu"] or "[]")
+    except (TypeError, json.JSONDecodeError):
+        values["hidden_menu"] = []
+    return values
+
+
+async def update_user_setting(uid, key, value):
+    allowed = set(DEFAULT_USER_SETTINGS)
+    if key not in allowed:
+        raise ValueError("Неизвестная настройка пользователя.")
+    if key == "hidden_menu":
+        value = json.dumps(sorted(set(value or [])), ensure_ascii=False)
+    elif key == "bell_shift":
+        value = str(value)
+        if value not in {"1", "2"}:
+            raise ValueError("Смена должна быть 1 или 2.")
+    else:
+        value = int(bool(value))
+    async with aiosqlite.connect(_database_path()) as db:
+        await db.execute("INSERT OR IGNORE INTO user_settings(telegram_id) VALUES(?)", (uid,))
+        await db.execute(f"UPDATE user_settings SET {key}=? WHERE telegram_id=?", (value, uid))
+        await db.commit()
+
+
+async def toggle_sport_subscription(uid, section_id):
+    async with aiosqlite.connect(_database_path()) as db:
+        cur = await db.execute("SELECT 1 FROM sports_subscriptions WHERE telegram_id=? AND section_id=?", (uid, section_id))
+        exists = await cur.fetchone()
+        if exists:
+            await db.execute("DELETE FROM sports_subscriptions WHERE telegram_id=? AND section_id=?", (uid, section_id))
+            selected = False
+        else:
+            await db.execute("INSERT INTO sports_subscriptions(telegram_id,section_id) VALUES(?,?)", (uid, section_id))
+            selected = True
+        await db.commit()
+    return selected
+
+
+async def get_sport_subscriptions(uid):
+    async with aiosqlite.connect(_database_path()) as db:
+        rows = await (await db.execute("SELECT section_id FROM sports_subscriptions WHERE telegram_id=?", (uid,))).fetchall()
+    return {row[0] for row in rows}
+
+
+async def users_for_sport(section_id):
+    async with aiosqlite.connect(_database_path()) as db:
+        rows = await (await db.execute("""SELECT s.telegram_id FROM sports_subscriptions s
+            JOIN user_settings p ON p.telegram_id=s.telegram_id
+            WHERE s.section_id=? AND p.notifications_enabled=1 AND p.sports_reminders=1""", (section_id,))).fetchall()
+    return [row[0] for row in rows]
+
+
+async def users_for_group_preference(group_name, college_id, preference):
+    if preference not in {"schedule_changes", "cancellations", "transfers", "teacher_changes", "class_bells"}:
+        raise ValueError("Неизвестный тип уведомления.")
+    async with aiosqlite.connect(_database_path()) as db:
+        rows = await (await db.execute(f"""SELECT u.telegram_id FROM users u
+            JOIN user_settings p ON p.telegram_id=u.telegram_id
+            WHERE u.group_name=? AND u.college_id=? AND p.notifications_enabled=1 AND p.{preference}=1""",
+            (group_name, college_id))).fetchall()
+    return [row[0] for row in rows]
+
+
+async def claim_notification(notification_key):
+    async with aiosqlite.connect(_database_path()) as db:
+        cur = await db.execute("INSERT OR IGNORE INTO notification_ledger(notification_key) VALUES(?)", (notification_key,))
+        await db.commit()
+        return cur.rowcount == 1
+
+
+async def get_auto_schedule_snapshot(college_id, group_name, schedule_date):
+    async with aiosqlite.connect(_database_path()) as db:
+        row = await (await db.execute("SELECT rows_json FROM auto_schedule_snapshots WHERE college_id=? AND group_name=? AND schedule_date=?",
+                                     (college_id, group_name, schedule_date))).fetchone()
+    return json.loads(row[0]) if row else None
+
+
+async def save_auto_schedule_snapshots(college_id, buckets):
+    async with aiosqlite.connect(_database_path()) as db:
+        await db.execute("BEGIN IMMEDIATE")
+        for (group_name, schedule_date), rows in buckets.items():
+            packed = json.dumps(rows, ensure_ascii=False, sort_keys=True)
+            await db.execute("""INSERT INTO auto_schedule_snapshots
+                (college_id,group_name,schedule_date,rows_json,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+                ON CONFLICT(college_id,group_name,schedule_date) DO UPDATE SET
+                rows_json=excluded.rows_json,updated_at=CURRENT_TIMESTAMP""",
+                (college_id, group_name, schedule_date, packed))
+        await db.commit()
+
+
+async def get_auto_schedule_snapshots(college_id):
+    async with aiosqlite.connect(_database_path()) as db:
+        rows = await (await db.execute("SELECT group_name,schedule_date,rows_json FROM auto_schedule_snapshots WHERE college_id=?", (college_id,))).fetchall()
+    return {(r[0], r[1]): json.loads(r[2]) for r in rows}
+
+
+async def users_with_preference(preference):
+    if preference not in {"class_bells", "sports_reminders"}:
+        raise ValueError("Неизвестный тип уведомления.")
+    async with aiosqlite.connect(_database_path()) as db:
+        rows = await (await db.execute(f"""SELECT u.telegram_id,u.group_name,u.college_id,u.college_branch,p.bell_shift
+            FROM users u JOIN user_settings p ON p.telegram_id=u.telegram_id
+            WHERE p.notifications_enabled=1 AND p.{preference}=1 AND u.group_name IS NOT NULL""")).fetchall()
+    return [{"telegram_id": r[0], "group_name": r[1], "college_id": r[2], "college_branch": r[3], "bell_shift": r[4]} for r in rows]
 
 async def save_announcement(uid, group, body, college_id="kuzpk"):
     async with aiosqlite.connect(_database_path()) as db:

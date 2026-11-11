@@ -252,15 +252,31 @@ async def get_groups(college_id="kuzpk"):
             groups = await asyncio.to_thread(yamk_groups, branch)
             result.extend(r["name"] for r in groups)
         return sorted(set(result) | set(imported))
+    site_groups = []
+    try:
+        from schedule_sync import fetch_kuzpk_group_names
+        site_groups = await asyncio.to_thread(fetch_kuzpk_group_names)
+    except Exception as exc:
+        logging.warning("Не удалось загрузить список групп КузПК с сайта: %s", exc)
     new_rows = _new_schedule_rows()
     if new_rows:
-        return sorted({str(r["group"]).strip() for r in new_rows if r.get("group")} | set(imported))
+        return sorted({str(r["group"]).strip() for r in new_rows if r.get("group")} | set(imported) | set(site_groups))
     rows = await _values("Группы")
     found = [str(r.get("group","")).strip() for r in rows if r.get("group")]
     rows = _local_rows("Расписание пар")
     found.extend(str(r.get("Группа", "")).strip() for r in rows if r.get("Группа"))
     found.extend(str(r.get("group", "")).strip() for r in _new_schedule_rows() if r.get("group"))
-    return sorted(set(found) | set(imported)) or DEMO_GROUPS
+    return sorted(set(found) | set(imported) | set(site_groups)) or DEMO_GROUPS
+
+
+async def _schedule_override_rows(college_id="kuzpk", college_branch=None, day=None):
+    if day is None:
+        today = date.today()
+        start, end = (today - timedelta(days=365)).isoformat(), (today + timedelta(days=365)).isoformat()
+    else:
+        start = end = day.isoformat()
+    by_group_day = await get_schedule_overrides(college_id, start, end, college_branch or "")
+    return [row for items in by_group_day.values() for row in items]
 
 
 async def _with_schedule_overrides(by_day, group, days, college_id, college_branch):
@@ -271,33 +287,72 @@ async def _with_schedule_overrides(by_day, group, days, college_id, college_bran
         replacement = overrides.get((group, day.isoformat()))
         if replacement is not None:
             by_day[day] = replacement
-    return {day: _collapse_lessons(rows) for day, rows in by_day.items()}
+    result = {day: _collapse_lessons(rows) for day, rows in by_day.items()}
+    for day, rows in result.items():
+        result[day] = await _with_bell_times(rows, day, college_id)
+    return result
+
+
+async def _with_bell_times(rows, day, college_id="kuzpk"):
+    if not rows:
+        return rows
+    try:
+        bells = await get_bells(college_id)
+    except Exception:
+        return rows
+    weekday = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")[day.weekday()]
+    matches = [row for row in bells if weekday in str(row.get("section", "")).casefold()]
+    if not matches:
+        return rows
+    def slot_number(item):
+        found = re.search(r"(\d+)\s*пара", str(item.get("lesson", "")), re.I)
+        return int(found.group(1)) if found else None
+    for item in rows:
+        if item.get("start") and item.get("end"):
+            continue
+        try:
+            number = int(str(item.get("lesson_no") or ""))
+        except ValueError:
+            continue
+        candidates = [bell for bell in matches if slot_number(bell) == number]
+        if not candidates:
+            continue
+        bell = candidates[0]
+        first = str(bell.get("first") or "")
+        second = str(bell.get("second") or "")
+        first_times = re.findall(r"\d{1,2}:\d{2}", first)
+        second_times = re.findall(r"\d{1,2}:\d{2}", second)
+        starts = first_times[:1] or second_times[:1]
+        ends = second_times[-1:] or first_times[-1:]
+        if starts and ends:
+            item["start"], item["end"] = starts[0], ends[0]
+    return rows
 
 async def get_schedule(group, day: date, college_id="kuzpk", college_branch=None):
     override = await get_schedule_override(college_id, group, day.isoformat(), college_branch or "")
     if override is not None:
-        return _collapse_lessons(override)
+        return await _with_bell_times(_collapse_lessons(override), day, college_id)
     if college_id == "pgt":
         from pgt import get_group_rows
         rows = await get_group_rows(group)
-        return [r for r in rows if r.get("date") == day.isoformat()]
+        return await _with_bell_times([r for r in rows if r.get("date") == day.isoformat()], day, college_id)
     if college_id == "kuztagis":
         from kuztagis import get_rows
         rows = await asyncio.to_thread(get_rows)
-        return _collapse_lessons([r for r in rows if r.get("date") == day.isoformat() and r.get("group") == group])
+        return await _with_bell_times(_collapse_lessons([r for r in rows if r.get("date") == day.isoformat() and r.get("group") == group]), day, college_id)
     if college_id == "yamk":
         from yamk import get_group_schedule
         rows = await asyncio.to_thread(get_group_schedule, group, college_branch or "otp")
-        return [r for r in rows if r.get("date") == day.isoformat()]
+        return await _with_bell_times([r for r in rows if r.get("date") == day.isoformat()], day, college_id)
     new_rows = _new_schedule_rows()
     if new_rows:
-        return _collapse_lessons([r for r in new_rows if r["date"] == day.isoformat() and r["group"] == group])
+        return await _with_bell_times(_collapse_lessons([r for r in new_rows if r["date"] == day.isoformat() and r["group"] == group]), day, college_id)
     rows = await _values("Расписание")
     if rows:
         result = [r for r in rows if str(r.get("group","")).strip() == group
             and str(r.get("date","")).strip() in (day.isoformat(), day.strftime("%d.%m.%Y"))]
         result.extend(r for r in _new_schedule_rows() if r["date"] == day.isoformat() and r["group"] == group)
-        return _collapse_lessons(result)
+        return await _with_bell_times(_collapse_lessons(result), day, college_id)
     rows = _local_rows("Расписание пар")
     result = []
     for r in rows:
@@ -310,7 +365,7 @@ async def get_schedule(group, day: date, college_id="kuzpk", college_branch=None
                            "teacher": r.get("Преподаватель"), "room": r.get("Аудитория"),
                            "lesson": r.get("Урок"), "group": r.get("Группа")})
     result.extend(r for r in _new_schedule_rows() if r["date"] == day.isoformat() and r["group"] == group)
-    return _collapse_lessons(result)
+    return await _with_bell_times(_collapse_lessons(result), day, college_id)
 
 async def get_week_schedule(group, monday: date, college_id="kuzpk", college_branch=None):
     """Load one week's schedule in a single source read, indexed by date."""
@@ -406,15 +461,15 @@ async def get_teachers(college_id="kuzpk", college_branch=None):
     if college_id == "yamk":
         from yamk import get_teachers as yamk_teachers
         return await asyncio.to_thread(yamk_teachers)
+    overrides = await _schedule_override_rows(college_id, college_branch)
     new_rows = _new_schedule_rows()
-    if new_rows:
-        return [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
-                for r in new_rows if r.get("teacher")]
     rows = await _values("Преподаватели")
     local = [{"teacher": r.get("Преподаватель"), "subject": r.get("Дисциплина"), "groups": r.get("Группа")}
              for r in _local_rows("Расписание пар") if r.get("Преподаватель")]
     local += [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
-              for r in _new_schedule_rows() if r.get("teacher")]
+              for r in new_rows if r.get("teacher")]
+    local += [{"teacher": r.get("teacher"), "subject": r.get("subject"), "groups": r.get("group")}
+              for r in overrides if r.get("teacher")]
     return rows + local
 async def get_rooms(college_id="kuzpk", college_branch=None):
     if college_id == "pgt":
@@ -428,12 +483,12 @@ async def get_rooms(college_id="kuzpk", college_branch=None):
         from yamk import get_entity_rows
         rows = await asyncio.to_thread(get_entity_rows, "room", "", college_branch)
         return [{"room": room} for room in sorted({r.get("room") for r in rows if r.get("room")})]
+    overrides = await _schedule_override_rows(college_id, college_branch)
     new_rows = _new_schedule_rows()
-    if new_rows:
-        return [{"room": room} for room in {r.get("room") for r in new_rows if r.get("room")}]
     rows = await _values("Аудитории")
     local = [{"room": room} for room in {r.get("Аудитория") for r in _local_rows("Расписание пар") if r.get("Аудитория")}]
-    local += [{"room": r["room"]} for r in _new_schedule_rows() if r.get("room")]
+    local += [{"room": r["room"]} for r in new_rows if r.get("room")]
+    local += [{"room": r["room"]} for r in overrides if r.get("room")]
     return rows + local
 async def get_bells(college_id="kuzpk"):
     try:
@@ -537,6 +592,13 @@ async def get_entity_schedule(kind, value, day: date | None, college_id="kuzpk",
         from yamk import get_entity_rows
         rows = await asyncio.to_thread(get_entity_rows, kind, value, college_branch)
         return rows if day is None else [row for row in rows if row.get("date") == day.isoformat()]
+    if day is not None:
+        imported = await _schedule_override_rows(college_id, college_branch, day)
+        if imported:
+            key = "teacher" if kind == "teacher" else "room"
+            result = [{k: r.get(k) for k in ("date", "lesson_no", "lesson", "subject", "teacher", "room", "group", "start", "end")}
+                      for r in imported if str(r.get(key, "")).strip() == value]
+            return await _with_bell_times(_collapse_lessons(result), day, college_id)
     new_rows = _new_schedule_rows()
     if new_rows:
         key = "teacher" if kind == "teacher" else "room"

@@ -1,4 +1,4 @@
-import asyncio, logging, os
+import asyncio, logging, os, hashlib, re
 from datetime import date, datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
@@ -13,7 +13,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
 
-from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements, save_schedule_update, save_bells_update, schedule_override_groups
+from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements, save_schedule_update, save_bells_update, schedule_override_groups, get_user_settings, update_user_setting, toggle_sport_subscription, get_sport_subscriptions, users_for_sport, users_for_group_preference, users_with_preference, claim_notification, get_auto_schedule_snapshots, save_auto_schedule_snapshots
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
 from services import format_schedule, format_week_schedule, format_bells, send_group_announcement, send_college_announcement, send_all_announcement
 from moodle import list_group_courses, categorize_courses, MoodleError, SPECIALTY_CODES
@@ -95,35 +95,44 @@ def is_courses_group(group_name):
     normalized = str(group_name or "").upper().replace("–", "-").replace("—", "-").replace(" ", "")
     return "-" in normalized and len(normalized) >= 5
 
-def main_menu(role="student", group_name=None, college_id="kuzpk"):
-    rows = [[InlineKeyboardButton(text="📅 Расписание", callback_data="menu|schedule")]]
-    rows.append([InlineKeyboardButton(text="⚙️ Моя группа", callback_data="menu|group")])
-    rows[-1].insert(0, InlineKeyboardButton(text="📢 Объявления", callback_data="menu|announcements"))
+def main_menu(role="student", group_name=None, college_id="kuzpk", hidden_menu=()):
+    hidden = set(hidden_menu or ())
+    rows = []
+    if "schedule" not in hidden:
+        rows.append([InlineKeyboardButton(text="📅 Расписание", callback_data="menu|schedule")])
+    if "announcements" not in hidden:
+        rows.append([InlineKeyboardButton(text="📢 Объявления", callback_data="menu|announcements")])
+    if "group" not in hidden:
+        rows.append([InlineKeyboardButton(text="🎓 Моя группа", callback_data="menu|group")])
+    if "notifications" not in hidden:
+        rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="settings|notifications")])
     if is_courses_group(group_name) and college_id == "kuzpk":
-        rows.insert(1, [InlineKeyboardButton(text="📚 Курсы", callback_data="menu|courses")])
-        rows.insert(2, [InlineKeyboardButton(text="🎓 Образование", callback_data="menu|education")])
+        if "courses" not in hidden: rows.append([InlineKeyboardButton(text="📚 Курсы", callback_data="menu|courses")])
+        if "education" not in hidden: rows.append([InlineKeyboardButton(text="🎓 Образование", callback_data="menu|education")])
     if role in ("admin", "starosta", "teacher"):
         rows.append([InlineKeyboardButton(text="🛠 Управление", callback_data="menu|management")])
     rows.append([InlineKeyboardButton(text="🏫 Сменить колледж", callback_data="menu|college")])
+    rows.append([InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings|home")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def back_button(destination="home"):
     label = "🏠 Главное меню" if destination == "home" else "↩️ Назад"
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"menu|{destination}")]])
 
-def schedule_menu_keyboard(college_id="kuzpk"):
+def schedule_menu_keyboard(college_id="kuzpk", hidden_menu=()):
+    hidden = set(hidden_menu or ())
     rows = [
-        [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")],
-        [InlineKeyboardButton(text="🔔 Звонки", callback_data="menu|bells")],
-        [InlineKeyboardButton(text="👨‍🏫 Преподаватель", callback_data="menu|teachers"), InlineKeyboardButton(text="🚪 Кабинет", callback_data="menu|rooms")],
-        [InlineKeyboardButton(text="🎓 Группа / специальность", callback_data="menu|group")],
+        [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")] if "schedule" not in hidden else [],
+        [InlineKeyboardButton(text="🔔 Звонки", callback_data="menu|bells")] if "bells" not in hidden and college_id != "pgt" else [],
+        ([InlineKeyboardButton(text="👨‍🏫 Преподаватель", callback_data="menu|teachers")] if "teachers" not in hidden else []) + ([InlineKeyboardButton(text="🚪 Кабинет", callback_data="menu|rooms")] if "rooms" not in hidden else []),
+        [InlineKeyboardButton(text="🎓 Группа / специальность", callback_data="menu|group")] if "group" not in hidden else [],
+        [InlineKeyboardButton(text="👀 Посмотреть другую группу", callback_data="menu|browse_group")] if "schedule" not in hidden else [],
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
     ]
+    rows = [row for row in rows if row]
     if college_id == "kuzpk":
-        rows.insert(-1, [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education_schedule")])
-        rows.insert(-1, [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")])
-    if college_id == "pgt":
-        rows.pop(1)  # У ПГТ на сайте не опубликовано расписание звонков.
+        if "education" not in hidden: rows.insert(-1, [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education_schedule")])
+        if "sports" not in hidden: rows.insert(-1, [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -200,17 +209,19 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
             return
     if action == "home":
         u = await get_user(c.from_user.id)
+        prefs = await get_user_settings(c.from_user.id)
         role = "admin" if c.from_user.id == ADMIN_ID else (u["role"] if u else "student")
         college = (u or {}).get("college_id", "kuzpk")
-        await safe_edit(c.message, f"🎓 <b>Расписание · {college_label(college)}</b>\nВыбери раздел:", reply_markup=main_menu(role, u["group_name"] if u else None, college))
+        await safe_edit(c.message, f"🎓 <b>Расписание · {college_label(college)}</b>\nВыбери раздел:", reply_markup=main_menu(role, u["group_name"] if u else None, college, prefs["hidden_menu"]))
     elif action == "college":
         await safe_edit(c.message, "🗺 <b>Выбери регион</b>", reply_markup=city_keyboard())
     elif action == "city":
         await safe_edit(c.message, "🗺 <b>Выбери регион</b>", reply_markup=city_keyboard())
     elif action == "schedule":
         u = await get_user(c.from_user.id)
+        prefs = await get_user_settings(c.from_user.id)
         college_id = (u or {}).get("college_id", "kuzpk")
-        await safe_edit(c.message, f"📅 <b>Расписание · {college_label(college_id)}</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard(college_id))
+        await safe_edit(c.message, f"📅 <b>Расписание · {college_label(college_id)}</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard(college_id, prefs["hidden_menu"]))
     elif action == "courses":
         user = await get_user(c.from_user.id)
         if not user or user.get("college_id") != "kuzpk" or not is_courses_group(user.get("group_name")):
@@ -227,7 +238,7 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
             back_to="schedule" if action == "education_schedule" else "home",
         )
     elif action == "sports":
-        await show_sports_sections(c.message)
+        await show_sports_sections(c.message, c.from_user.id)
     elif action in ("today", "tomorrow"):
         await render_schedule(c.message, c.from_user.id, datetime.now(TZ).date() + timedelta(days=0 if action == "today" else 1), edit=True)
     elif action == "week":
@@ -245,6 +256,18 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
             return
         kb = await group_keyboard(college_id=college_id)
         await safe_edit(c.message, "🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:", reply_markup=kb or back_button())
+    elif action == "browse_group":
+        user = await get_user(c.from_user.id)
+        college_id = (user or {}).get("college_id", "kuzpk")
+        if college_id == "yamk":
+            await safe_edit(c.message, "🏫 <b>ЯМК</b>\nДля просмотра расписания выбери отделение:", reply_markup=yamk_menu_keyboard())
+        else:
+            kb = await group_keyboard(college_id=college_id, view_mode=True)
+            await safe_edit(c.message, "👀 <b>Временный просмотр другой группы</b>\nВыбери специальность. Основная группа профиля не изменится:", reply_markup=kb or back_button("schedule"))
+    elif action == "settings":
+        await show_settings(c.message, c.from_user.id, "home")
+    elif action == "notifications":
+        await show_settings(c.message, c.from_user.id, "notifications")
     elif action == "bells":
         user = await get_user(c.from_user.id)
         await show_bells_schedule(c.message, (user or {}).get("college_id", "kuzpk"),
@@ -292,6 +315,75 @@ EDUCATION_TYPES = {
     "gia": ("Программы ГИА", "🎓"),
     "gia_archive": ("Архив программ ГИА · 2025–2026", "🗂️"),
 }
+
+MENU_SETTING_LABELS = {
+    "schedule": "📅 Расписание", "bells": "🔔 Звонки", "teachers": "👨‍🏫 Преподаватели",
+    "rooms": "🚪 Аудитории", "group": "🎓 Моя группа", "courses": "📚 Курсы",
+    "education": "🎓 Образование", "sports": "🏅 Спортивные секции",
+    "announcements": "📢 Объявления", "notifications": "🔔 Уведомления",
+}
+NOTIFICATION_LABELS = {
+    "notifications_enabled": "🔔 Все уведомления",
+    "schedule_changes": "📅 Изменения расписания",
+    "cancellations": "❌ Отмена занятий",
+    "transfers": "↪️ Переносы занятий",
+    "teacher_changes": "👨‍🏫 Замены преподавателей",
+    "sports_reminders": "🏅 Напоминания о секциях",
+    "class_bells": "⏰ Начало пар и перемены",
+}
+
+
+async def show_settings(target, uid, page="home"):
+    prefs = await get_user_settings(uid)
+    if page == "menu":
+        buttons = []
+        for key, label in MENU_SETTING_LABELS.items():
+            visible = key not in prefs["hidden_menu"]
+            buttons.append([InlineKeyboardButton(text=f"{'✅' if visible else '▫️'} {label}", callback_data=f"settings|menu_toggle|{key}")])
+        buttons += [[InlineKeyboardButton(text="↩️ Настройки", callback_data="settings|home")],
+                    [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]]
+        text = "⚙️ <b>Кнопки главного меню</b>\n\nНажимай на раздел, чтобы показать или скрыть его. Скрытые функции останутся доступны в настройках."
+    elif page == "notifications":
+        buttons = []
+        for key, label in NOTIFICATION_LABELS.items():
+            enabled = bool(prefs[key])
+            buttons.append([InlineKeyboardButton(text=f"{'✅' if enabled else '▫️'} {label}", callback_data=f"settings|notify_toggle|{key}")])
+        buttons.append([InlineKeyboardButton(text=f"🕘 Смена для звонков: {prefs['bell_shift']}", callback_data="settings|bell_shift")])
+        buttons += [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]]
+        text = "🔔 <b>Уведомления</b>\n\nРасписание и напоминания приходят только по выбранной основной группе и секциям. Начало пар и перемены можно включить отдельно."
+    else:
+        buttons = [[InlineKeyboardButton(text="🧩 Кнопки главного меню", callback_data="settings|menu")],
+                   [InlineKeyboardButton(text="🔔 Уведомления", callback_data="settings|notifications")],
+                   [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]]
+        text = "⚙️ <b>Настройки Степаши</b>\n\nНастрой меню и уведомления под себя."
+    await safe_edit(target, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+
+@dp.callback_query(F.data.startswith("settings|"))
+async def settings_action(c: CallbackQuery):
+    _, action, *args = c.data.split("|")
+    if action == "menu_toggle" and args and args[0] in MENU_SETTING_LABELS:
+        key = args[0]
+        prefs = await get_user_settings(c.from_user.id)
+        hidden = set(prefs["hidden_menu"])
+        hidden.remove(key) if key in hidden else hidden.add(key)
+        await update_user_setting(c.from_user.id, "hidden_menu", hidden)
+        await show_settings(c.message, c.from_user.id, "menu")
+    elif action == "notify_toggle" and args and args[0] in NOTIFICATION_LABELS:
+        key = args[0]
+        prefs = await get_user_settings(c.from_user.id)
+        await update_user_setting(c.from_user.id, key, not bool(prefs[key]))
+        await show_settings(c.message, c.from_user.id, "notifications")
+    elif action == "bell_shift":
+        prefs = await get_user_settings(c.from_user.id)
+        await update_user_setting(c.from_user.id, "bell_shift", "2" if prefs["bell_shift"] == "1" else "1")
+        await show_settings(c.message, c.from_user.id, "notifications")
+    elif action in ("home", "menu", "notifications"):
+        await show_settings(c.message, c.from_user.id, action)
+    else:
+        await c.answer("Настройка не найдена.", show_alert=True)
+        return
+    await c.answer()
 
 GIA_ARCHIVE_SUMMARY = {
     "49.02.01": ("Физическая культура", "18 мая – 28 июня 2026", 21),
@@ -435,8 +527,9 @@ async def show_education_documents(c: CallbackQuery):
                 logging.exception("Failed to send education document fallback link")
 
 
-async def show_sports_sections(target):
-    rows = [[InlineKeyboardButton(text=f"🏅 {section['name']}", callback_data=f"sports|{i}")]
+async def show_sports_sections(target, uid):
+    selected = await get_sport_subscriptions(uid)
+    rows = [[InlineKeyboardButton(text=f"{'✅' if str(i) in selected else '▫️'} {section['name']}", callback_data=f"sports|{i}")]
             for i, section in enumerate(SPORTS_SECTIONS)]
     rows.append([InlineKeyboardButton(text="↩️ К расписанию", callback_data="menu|schedule")])
     await safe_edit(target,
@@ -446,21 +539,34 @@ async def show_sports_sections(target):
 
 @dp.callback_query(F.data.startswith("sports|"))
 async def sports_section(c: CallbackQuery):
-    raw_index = c.data.split("|", 1)[1]
-    if not raw_index.isdigit() or int(raw_index) >= len(SPORTS_SECTIONS):
-        await c.answer("Список секций обновился.", show_alert=True)
-        return
-    section = SPORTS_SECTIONS[int(raw_index)]
+    bits = c.data.split("|")
+    answer_text = None
+    if len(bits) == 3 and bits[1] == "toggle" and bits[2].isdigit():
+        index = int(bits[2])
+        if index >= len(SPORTS_SECTIONS):
+            await c.answer("Список секций обновился.", show_alert=True); return
+        enabled = await toggle_sport_subscription(c.from_user.id, str(index))
+        answer_text = "Напоминания о секции включены 🐾" if enabled else "Секция удалена из избранного."
+        section = SPORTS_SECTIONS[index]
+    else:
+        raw_index = bits[1] if len(bits) > 1 else ""
+        if not raw_index.isdigit() or int(raw_index) >= len(SPORTS_SECTIONS):
+            await c.answer("Список секций обновился.", show_alert=True)
+            return
+        section = SPORTS_SECTIONS[int(raw_index)]
+        index = int(raw_index)
     schedule = "\n".join(
         f"• <b>{SPORTS_DAYS[day]}</b> · {time}"
         for day, time in section["days"].items()
     )
-    rows = [[InlineKeyboardButton(text="↩️ Все секции", callback_data="menu|sports")],
+    selected = await get_sport_subscriptions(c.from_user.id)
+    rows = [[InlineKeyboardButton(text="✅ Напоминать мне" if str(index) not in selected else "🔕 Отключить напоминания", callback_data=f"sports|toggle|{index}")],
+            [InlineKeyboardButton(text="↩️ Все секции", callback_data="menu|sports")],
             [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]]
     await safe_edit(c.message,
-        f"🏅 <b>{escape(section['name'])}</b>\n\n{schedule}\n\n👤 Ответственный: <b>{escape(section['coach'])}</b>",
+        f"🏅 <b>{escape(section['name'])}</b>\n\n{schedule}\n\n📍 Место: спортивный комплекс\n👤 Ответственный: <b>{escape(section['coach'])}</b>",
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
-    await c.answer()
+    await c.answer(answer_text)
 
 
 async def show_moodle_courses(target, group_name):
@@ -961,9 +1067,28 @@ async def schedule_import_confirm(c: CallbackQuery, state: FSMContext):
         await safe_edit(c.message, "Предпросмотр устарел. Начни обновление ещё раз.", reply_markup=back_button("management"))
         await c.answer(); return
     try:
+        branch = data.get("pending_schedule_branch", "")
+        affected = {(str(row.get("group") or "").strip(), str(row.get("date") or "").strip())
+                    for row in rows if row.get("group") and row.get("date")}
+        affected.update((str(group).strip(), str(day).strip()) for group, day in data.get("pending_schedule_replace_days", []) if group and day)
+        old_schedule = {}
+        for group, raw_day in affected:
+            try:
+                old_schedule[(group, raw_day)] = await get_schedule(group, date.fromisoformat(raw_day), college_id, branch or None)
+            except ValueError:
+                continue
         count = await save_schedule_update(college_id, rows, data.get("pending_schedule_source", ""),
-                                          c.from_user.id, data.get("pending_schedule_branch", ""),
+                                          c.from_user.id, branch,
                                           data.get("pending_schedule_replace_days", []))
+        new_schedule = {key: [] for key in affected}
+        for row in rows:
+            key = (str(row.get("group") or "").strip(), str(row.get("date") or "").strip())
+            if key in new_schedule:
+                new_schedule[key].append(row)
+        for (group, raw_day), previous in old_schedule.items():
+            updated = new_schedule.get((group, raw_day), [])
+            if _schedule_signature(previous) != _schedule_signature(updated):
+                await _send_schedule_change(group, raw_day, previous, updated, college_id)
     except Exception as exc:
         logging.exception("Не удалось сохранить обновление расписания")
         await c.answer("Не удалось сохранить расписание.", show_alert=True)
@@ -1108,14 +1233,18 @@ async def admin_schedule_text(m: Message, state: FSMContext):
         logging.exception("Не удалось подготовить правку расписания")
         await m.answer(f"Не удалось подготовить изменение: {escape(str(exc))}")
 
-async def group_keyboard(prefix=None, page=0, college_id="kuzpk"):
+async def group_keyboard(prefix=None, page=0, college_id="kuzpk", view_mode=False):
     groups = await list_groups(college_id)
     if not groups:
         return None
     prefixes = sorted({str(g).split("-", 1)[0] for g in groups})
     if prefix is None:
-        rows = [[InlineKeyboardButton(text=f"🎓 {p} · {sum(str(g).startswith(p+'-') for g in groups)} групп", callback_data=f"spec|{p}|0")]
+        prefix_action = "specview" if view_mode else "spec"
+        rows = [[InlineKeyboardButton(text=f"🎓 {p} · {sum(str(g).startswith(p+'-') for g in groups)} групп", callback_data=f"{prefix_action}|{p}|0")]
                 for p in prefixes]
+        if view_mode:
+            rows.append([InlineKeyboardButton(text="↩️ К расписанию", callback_data="menu|schedule")])
+            return InlineKeyboardMarkup(inline_keyboard=rows)
         rows.extend([[InlineKeyboardButton(text="🏫 Сменить колледж", callback_data="menu|college")],
                      [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]])
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1124,12 +1253,13 @@ async def group_keyboard(prefix=None, page=0, college_id="kuzpk"):
     pages = max(1, (len(selected) + size - 1) // size)
     page = max(0, min(page, pages - 1))
     chunk = selected[page*size:(page+1)*size]
-    rows = [[InlineKeyboardButton(text=g, callback_data=f"group:{g}")] for g in chunk]
+    rows = [[InlineKeyboardButton(text=g, callback_data=f"groupview:{g}" if view_mode else f"group:{g}")] for g in chunk]
     nav = []
-    if page: nav.append(InlineKeyboardButton(text="‹", callback_data=f"spec|{prefix}|{page-1}"))
-    nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="spec|noop|0"))
-    if page + 1 < pages: nav.append(InlineKeyboardButton(text="›", callback_data=f"spec|{prefix}|{page+1}"))
-    rows.extend([nav, [InlineKeyboardButton(text="↩️ Специальности", callback_data="spec|list|0")]])
+    action = "specview" if view_mode else "spec"
+    if page: nav.append(InlineKeyboardButton(text="‹", callback_data=f"{action}|{prefix}|{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data=f"{action}|noop|0"))
+    if page + 1 < pages: nav.append(InlineKeyboardButton(text="›", callback_data=f"{action}|{prefix}|{page+1}"))
+    rows.extend([nav, [InlineKeyboardButton(text="↩️ Специальности", callback_data=f"{action}|list|0")]])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 @dp.callback_query(F.data.startswith("spec|"))
@@ -1154,6 +1284,34 @@ async def specialty_groups(c: CallbackQuery):
         text = f"🎓 <b>Специальность {escape(prefix)}</b> · {count} групп\nВыбери группу:"
     await safe_edit(c.message, text, reply_markup=markup or back_button())
     await c.answer()
+
+
+@dp.callback_query(F.data.startswith("specview|"))
+async def specialty_groups_view(c: CallbackQuery):
+    _, prefix, raw_page = c.data.split("|")
+    if prefix == "noop":
+        await c.answer(); return
+    user = await get_user(c.from_user.id)
+    college_id = (user or {}).get("college_id", "kuzpk")
+    if prefix == "list":
+        markup = await group_keyboard(college_id=college_id, view_mode=True)
+        text = "👀 <b>Временный просмотр</b>\nВыбери специальность:"
+    else:
+        markup = await group_keyboard(prefix, int(raw_page), college_id, view_mode=True)
+        text = f"👀 <b>Специальность {escape(prefix)}</b>\nВыбери группу для временного просмотра:"
+    await safe_edit(c.message, text, reply_markup=markup or back_button("schedule"))
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("groupview:"))
+async def view_other_group(c: CallbackQuery):
+    group = c.data.split(":", 1)[1]
+    user = await get_user(c.from_user.id)
+    college_id = (user or {}).get("college_id", "kuzpk")
+    if group not in await list_groups(college_id):
+        await c.answer("Эта группа больше не найдена.", show_alert=True); return
+    await render_schedule(c.message, c.from_user.id, datetime.now(TZ).date(), edit=True, group_override=group, temporary=True)
+    await c.answer("Открыт временный просмотр. Основная группа не менялась.")
 
 @dp.message(CommandStart())
 async def start(m: Message, state: FSMContext):
@@ -1180,7 +1338,7 @@ async def start(m: Message, state: FSMContext):
         return
     await remove_old_keyboard(m)
     college_id = user.get("college_id", "kuzpk")
-    await m.answer(f"🎓 <b>Расписание · {college_label(college_id)}</b>\nТвоя группа: <b>{escape(str(user['group_name']))}</b>\n\nВыбери раздел ниже:", reply_markup=main_menu(role, user["group_name"], college_id))
+    await m.answer(f"🎓 <b>Расписание · {college_label(college_id)}</b>\nТвоя группа: <b>{escape(str(user['group_name']))}</b>\n\nВыбери раздел ниже:", reply_markup=main_menu(role, user["group_name"], college_id, (await get_user_settings(m.from_user.id))["hidden_menu"]))
 
 
 @dp.callback_query(F.data == "subscription|check")
@@ -1547,7 +1705,7 @@ async def choose_group(c: CallbackQuery):
     await add_user(c.from_user.id, c.from_user.full_name, role)
     await set_group(c.from_user.id, group)
     user = await get_user(c.from_user.id)
-    await safe_edit(c.message, f"🎓 <b>Группа сохранена: {escape(group)}</b>\n\nВыбери раздел:", reply_markup=main_menu(role, user["group_name"], college_id))
+    await safe_edit(c.message, f"🎓 <b>Группа сохранена: {escape(group)}</b>\n\nВыбери раздел:", reply_markup=main_menu(role, user["group_name"], college_id, (await get_user_settings(c.from_user.id))["hidden_menu"]))
 
 def schedule_keyboard(day: date, mode: str, page: int = 0):
     if mode == "w":
@@ -1571,30 +1729,50 @@ def schedule_keyboard(day: date, mode: str, page: int = 0):
                                  callback_data=f"sc|{'w' if mode == 'd' else 'd'}|{week_anchor if mode == 'd' else day_for_daily:%Y%m%d}|0")
     return InlineKeyboardMarkup(inline_keyboard=[nav, [toggle, InlineKeyboardButton(text="↩️ Назад", callback_data="sc|back|0|0")]])
 
-async def render_schedule(target, uid: int, day: date, mode: str = "d", page: int = 0, edit: bool = False):
+def temporary_schedule_keyboard(group_name, day, mode):
+    if mode == "w":
+        monday = day - timedelta(days=day.weekday())
+        nav = [InlineKeyboardButton(text="‹ Неделя", callback_data=f"gsc|{group_name}|w|{(monday-timedelta(days=7)):%Y%m%d}|0"),
+               InlineKeyboardButton(text=f"{monday:%d.%m}–{(monday+timedelta(days=6)):%d.%m}", callback_data="sc|noop|0|0"),
+               InlineKeyboardButton(text="Неделя ›", callback_data=f"gsc|{group_name}|w|{(monday+timedelta(days=7)):%Y%m%d}|0")]
+        anchor = monday
+        toggle = InlineKeyboardButton(text="📅 По дням", callback_data=f"gsc|{group_name}|d|{datetime.now(TZ).date():%Y%m%d}|0")
+    else:
+        nav = [InlineKeyboardButton(text="‹ День", callback_data=f"gsc|{group_name}|d|{(day-timedelta(days=1)):%Y%m%d}|0"),
+               InlineKeyboardButton(text="Сегодня", callback_data=f"gsc|{group_name}|d|{datetime.now(TZ).date():%Y%m%d}|0"),
+               InlineKeyboardButton(text="День ›", callback_data=f"gsc|{group_name}|d|{(day+timedelta(days=1)):%Y%m%d}|0")]
+        anchor = day - timedelta(days=day.weekday())
+        toggle = InlineKeyboardButton(text="📆 Неделя", callback_data=f"gsc|{group_name}|w|{anchor:%Y%m%d}|0")
+    return InlineKeyboardMarkup(inline_keyboard=[nav, [toggle],
+        [InlineKeyboardButton(text="↩️ Выбор другой группы", callback_data="menu|browse_group"),
+         InlineKeyboardButton(text="🎓 Моя группа", callback_data=f"gsc|return|d|{datetime.now(TZ).date():%Y%m%d}|0")]])
+
+
+async def render_schedule(target, uid: int, day: date, mode: str = "d", page: int = 0, edit: bool = False, group_override=None, temporary=False):
     u = await get_user(uid)
     if not u or not u["group_name"]:
         text = "Сначала выбери группу командой /start."
         if edit: await safe_edit(target, text, reply_markup=None)
         else: await target.answer(text)
         return
+    group_name = group_override or u["group_name"]
     if mode == "w":
         monday = day - timedelta(days=day.weekday())
-        schedule = await get_week_schedule(u["group_name"], monday, u.get("college_id", "kuzpk"), u.get("college_branch"))
-        text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_week_schedule(u["group_name"], monday, schedule)
+        schedule = await get_week_schedule(group_name, monday, u.get("college_id", "kuzpk"), u.get("college_branch"))
+        text = ("👀 <b>Временный просмотр</b>\n" if temporary else "") + f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_week_schedule(group_name, monday, schedule)
         if u.get("college_id") == "yamk" and not any(schedule.values()):
             published = await _yamk_published_dates(u)
             if published:
                 text += f"\n\nℹ️ На сайте ЯМК сейчас доступно расписание за {published[0]:%d.%m}–{published[-1]:%d.%m.%Y}."
-        markup = schedule_keyboard(monday, mode)
+        markup = temporary_schedule_keyboard(group_name, monday, mode) if temporary else schedule_keyboard(monday, mode)
     else:
-        rows = await get_schedule(u["group_name"], day, u.get("college_id", "kuzpk"), u.get("college_branch"))
-        text = f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_schedule(u["group_name"], day, rows)
+        rows = await get_schedule(group_name, day, u.get("college_id", "kuzpk"), u.get("college_branch"))
+        text = ("👀 <b>Временный просмотр</b>\n" if temporary else "") + f"🏫 <b>{college_label(u.get('college_id', 'kuzpk'))}</b>\n" + format_schedule(group_name, day, rows)
         if u.get("college_id") == "yamk" and not rows:
             published = await _yamk_published_dates(u)
             if published and day.isoformat() not in {value.isoformat() for value in published}:
                 text += f"\n\nℹ️ На сайте ЯМК сейчас доступно расписание за {published[0]:%d.%m}–{published[-1]:%d.%m.%Y}."
-        markup = schedule_keyboard(day, mode)
+        markup = temporary_schedule_keyboard(group_name, day, mode) if temporary else schedule_keyboard(day, mode)
     if edit: await safe_edit(target, text, reply_markup=markup)
     else: await target.answer(text, reply_markup=markup)
 
@@ -1635,12 +1813,28 @@ async def schedule_navigation(c: CallbackQuery):
     if mode == "back":
         user = await get_user(c.from_user.id)
         college_id = (user or {}).get("college_id", "kuzpk")
-        await safe_edit(c.message, f"📅 <b>Расписание · {college_label(college_id)}</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard(college_id))
+        await safe_edit(c.message, f"📅 <b>Расписание · {college_label(college_id)}</b>\nВыбери, что посмотреть:", reply_markup=schedule_menu_keyboard(college_id, (await get_user_settings(c.from_user.id))["hidden_menu"]))
         await c.answer(); return
     if mode == "x":
         await c.message.delete(); await c.answer(); return
     day = datetime.strptime(raw_day, "%Y%m%d").date()
     await render_schedule(c.message, c.from_user.id, day, mode, int(raw_page), edit=True)
+    await c.answer()
+
+
+@dp.callback_query(F.data.startswith("gsc|"))
+async def temporary_schedule_navigation(c: CallbackQuery):
+    _, group, mode, raw_day, _raw_page = c.data.split("|")
+    day = datetime.strptime(raw_day, "%Y%m%d").date()
+    user = await get_user(c.from_user.id)
+    if not user:
+        await c.answer("Нажми /start, чтобы открыть профиль.", show_alert=True); return
+    if group == "return":
+        await render_schedule(c.message, c.from_user.id, day, edit=True)
+    elif group not in await list_groups(user.get("college_id", "kuzpk")):
+        await c.answer("Группа больше не найдена.", show_alert=True); return
+    else:
+        await render_schedule(c.message, c.from_user.id, day, mode, edit=True, group_override=group, temporary=True)
     await c.answer()
 
 @dp.message(F.text == "🔔 Звонки")
@@ -1798,7 +1992,7 @@ async def role_help(m: Message):
 async def back_menu(m: Message):
     u = await get_user(m.from_user.id)
     role = "admin" if m.from_user.id == ADMIN_ID else (u["role"] if u else "student")
-    await m.answer("Главное меню:", reply_markup=main_menu(role, u["group_name"] if u else None, (u or {}).get("college_id", "kuzpk")))
+    await m.answer("Главное меню:", reply_markup=main_menu(role, u["group_name"] if u else None, (u or {}).get("college_id", "kuzpk"), (await get_user_settings(m.from_user.id))["hidden_menu"]))
 
 @dp.message(Command("help"))
 async def help_cmd(m: Message):
@@ -1813,11 +2007,221 @@ async def cancel(m: Message, state: FSMContext):
     await state.clear()
     await m.answer("Текущее действие отменено.")
 
+
+def _schedule_row_label(row):
+    parts = [f"{row.get('lesson_no') or '?'} пара", str(row.get("subject") or "Занятие")]
+    if row.get("room"): parts.append(f"кабинет {row['room']}")
+    if row.get("teacher"): parts.append(str(row["teacher"]))
+    return ", ".join(parts)
+
+
+def _schedule_signature(rows):
+    fields = ("lesson_no", "lesson", "subject", "teacher", "room")
+    return sorted(tuple(str(row.get(field) or "").strip() for field in fields) for row in rows)
+
+
+def _schedule_change_kind(old_rows, new_rows):
+    has_transfer = has_teacher_change = False
+    for old in old_rows:
+        same_subject = [new for new in new_rows if str(old.get("subject") or "") == str(new.get("subject") or "")]
+        if not same_subject:
+            return "cancellations"
+        same_pair = [new for new in same_subject if str(old.get("lesson_no")) == str(new.get("lesson_no"))]
+        if not same_pair:
+            has_transfer = True
+            continue
+        if any(old.get("room") != new.get("room") for new in same_pair):
+            has_transfer = True
+        if any(old.get("teacher") != new.get("teacher") and old.get("room") == new.get("room") for new in same_pair):
+            has_teacher_change = True
+    if has_transfer:
+        return "transfers"
+    if has_teacher_change:
+        return "teacher_changes"
+    return "schedule_changes"
+
+
+async def _send_schedule_change(group, schedule_date, old_rows, new_rows, college_id="kuzpk"):
+    preference = _schedule_change_kind(old_rows, new_rows)
+    audience = await users_for_group_preference(group, college_id, preference)
+    if not audience:
+        return
+    previous = "\n".join("• " + escape(_schedule_row_label(row)) for row in old_rows[:4]) or "занятий не было"
+    updated = "\n".join("• " + escape(_schedule_row_label(row)) for row in new_rows[:4]) or "занятия сняты"
+    day_label = date.fromisoformat(schedule_date).strftime("%d.%m.%Y")
+    message = ("🐶 <b>Гав-гав! Изменения в расписании!</b>\n\n"
+               f"У группы <b>{escape(group)}</b> обновилось расписание · {escape(COLLEGES.get(college_id, college_id))}.\n\n"
+               f"📅 {day_label}\n❌ <b>Было:</b>\n{previous}\n\n🐾 <b>Стало:</b>\n{updated}\n\n"
+               "Я уже обновил расписание — загляни проверить ❤️")
+    raw_key = f"schedule:{group}:{schedule_date}:{hashlib.sha256((repr(old_rows)+repr(new_rows)).encode()).hexdigest()}"
+    for uid in audience:
+        try:
+            if not await claim_notification(raw_key + f":{uid}"):
+                continue
+            await bot.send_message(uid, message)
+        except Exception:
+            logging.exception("Не удалось отправить уведомление об изменении расписания группе %s", group)
+
+
+async def sync_kuzpk_schedule():
+    from schedule_sync import fetch_kuzpk_schedule
+    today = datetime.now(TZ).date()
+    rows, buckets = await asyncio.to_thread(fetch_kuzpk_schedule, today)
+    old_buckets = await get_auto_schedule_snapshots("kuzpk")
+    first_sync = not old_buckets
+    changed_keys = {key for key, value in buckets.items() if old_buckets.get(key) != value}
+    # Don't rewrite an administrator's manual file on every poll when the site
+    # is unchanged. A later change on the official feed will take precedence.
+    if changed_keys:
+        updated_rows = [row for key in changed_keys for row in buckets[key]]
+        await save_schedule_update("kuzpk", updated_rows, "raspis.kuzpcdesk.ru/cg.htm", 0,
+                                   replace_days=list(changed_keys))
+    if not first_sync:
+        for key in changed_keys:
+            new_rows = buckets[key]
+            old_rows = old_buckets.get(key)
+            if old_rows is not None and old_rows != new_rows:
+                await _send_schedule_change(key[0], key[1], old_rows, new_rows, "kuzpk")
+    await save_auto_schedule_snapshots("kuzpk", buckets)
+    logging.info("Обновлён источник расписания КузПК: %s групповых дней, %s занятий", len(buckets), len(rows))
+
+
+def _time_value(value):
+    match = re.search(r"(\d{1,2}:\d{2})", str(value or ""))
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%H:%M").time()
+    except ValueError:
+        return None
+
+
+def _bell_pair_number(row):
+    match = re.search(r"(\d+)\s*пара", str(row.get("lesson") or ""), re.I)
+    return int(match.group(1)) if match else None
+
+
+def _day_bell_rows(rows, day, shift):
+    weekday = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")[day.weekday()]
+    matched = [r for r in rows if weekday in str(r.get("section", "")).casefold()
+               and str(r.get("shift", "")).strip().casefold().startswith(f"{shift} смена")]
+    # Prefer a day-specific rule over combined-weekday or curator-hour variants.
+    matched.sort(key=lambda r: (weekday not in str(r.get("section", "")).casefold(), len(str(r.get("section", "")))))
+    return matched
+
+
+async def _process_class_bell_notifications(now):
+    today = now.date()
+    subscribers = await users_with_preference("class_bells")
+    if not subscribers:
+        return
+    cache = {}
+    for user in subscribers:
+        group, college = user["group_name"], user["college_id"]
+        cache_key = (group, college, user.get("college_branch"))
+        if cache_key not in cache:
+            try:
+                cache[cache_key] = (await get_schedule(group, today, college, user.get("college_branch")), await get_bells(college))
+            except Exception:
+                logging.exception("Не удалось подготовить звонки для группы %s", group)
+                cache[cache_key] = ([], [])
+        schedule_rows, bells = cache[cache_key]
+        if not schedule_rows or not bells:
+            continue
+        pair_numbers = {int(str(row.get("lesson_no"))) for row in schedule_rows if str(row.get("lesson_no", "")).isdigit()}
+        for bell in _day_bell_rows(bells, today, user.get("bell_shift", "1")):
+            pair = _bell_pair_number(bell)
+            if pair not in pair_numbers:
+                continue
+            segments = []
+            first_times = re.findall(r"\d{1,2}:\d{2}", str(bell.get("first") or ""))
+            second_times = re.findall(r"\d{1,2}:\d{2}", str(bell.get("second") or ""))
+            if first_times:
+                segments.append((first_times[0], "Пара", None))
+                if str(bell.get("break_1") or "").strip() not in ("", "—", "-"):
+                    try: duration = int(re.search(r"\d+", str(bell["break_1"])).group())
+                    except (AttributeError, ValueError): duration = 0
+                    if duration: segments.append((first_times[-1], "Перемена", duration))
+            if second_times:
+                segments.append((second_times[0], "Пара продолжается", None))
+                if str(bell.get("break_2") or "").strip() not in ("", "—", "-"):
+                    try: duration = int(re.search(r"\d+", str(bell["break_2"])).group())
+                    except (AttributeError, ValueError): duration = 0
+                    if duration: segments.append((second_times[-1], "Перемена", duration))
+            for raw_time, label, duration in segments:
+                event_time = _time_value(raw_time)
+                if event_time != now.time().replace(second=0, microsecond=0):
+                    continue
+                if label == "Пара":
+                    description = f"Пара {pair} начинается"
+                elif label.startswith("Пара"):
+                    description = f"Начинается вторая часть пары {pair}"
+                else:
+                    description = f"Началась перемена на {duration} мин."
+                key = f"class:{user['telegram_id']}:{today}:{pair}:{label}:{raw_time}"
+                try:
+                    if not await claim_notification(key):
+                        continue
+                    await bot.send_message(user["telegram_id"], f"🐶 <b>Тяф! {escape(description)}</b>\n\n🎓 {escape(group)} · {raw_time}\nУдачного дня ❤️")
+                except Exception:
+                    logging.exception("Не удалось отправить напоминание о звонке пользователю %s", user["telegram_id"])
+
+
+async def _process_sports_reminders(now):
+    if now.weekday() >= len(SPORTS_DAYS):
+        return
+    for index, section in enumerate(SPORTS_SECTIONS):
+        period = section["days"].get(now.weekday())
+        if not period:
+            continue
+        start = _time_value(period)
+        if not start:
+            continue
+        training = datetime.combine(now.date(), start, tzinfo=TZ)
+        if training - timedelta(minutes=30) != now.replace(second=0, microsecond=0):
+            continue
+        for uid in await users_for_sport(str(index)):
+            key = f"sport:{uid}:{now.date()}:{index}:{start}"
+            try:
+                if not await claim_notification(key):
+                    continue
+                await bot.send_message(uid,
+                    f"🐶 <b>Тяф-тяф! Не забудь про тренировку!</b>\n\nСегодня у тебя {escape(section['name'].lower())}! 🏅\n"
+                    f"🕒 {start.strftime('%H:%M')} · через 30 минут\n📍 Спортивный комплекс\n👤 {escape(section['coach'])}\nДо встречи ❤️")
+            except Exception:
+                logging.exception("Не удалось отправить напоминание о секции %s", section["name"])
+
+
+async def background_tasks():
+    next_sync = datetime.now(TZ)
+    while True:
+        now = datetime.now(TZ).replace(second=0, microsecond=0)
+        if now >= next_sync:
+            try:
+                await sync_kuzpk_schedule()
+            except Exception:
+                logging.exception("Не удалось обновить расписание КузПК с сайта; используется сохранённая версия.")
+            next_sync = datetime.now(TZ) + timedelta(seconds=max(300, int(os.getenv("KUZPK_SYNC_INTERVAL", "600"))))
+        try:
+            await _process_class_bell_notifications(now)
+            await _process_sports_reminders(now)
+        except Exception:
+            logging.exception("Ошибка фоновой отправки напоминаний.")
+        await asyncio.sleep(20)
+
 async def main():
     await init_db()
     if ADMIN_ID:
         await add_user(ADMIN_ID, "Администратор", "admin")
-    await dp.start_polling(bot)
+    task = asyncio.create_task(background_tasks())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
 if __name__ == "__main__":
     asyncio.run(main())
