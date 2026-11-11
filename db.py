@@ -50,11 +50,8 @@ async def init_db():
             teacher_changes INTEGER NOT NULL DEFAULT 1,
             sports_reminders INTEGER NOT NULL DEFAULT 0,
             class_bells INTEGER NOT NULL DEFAULT 0,
-            bell_shift TEXT NOT NULL DEFAULT '1',
             FOREIGN KEY(telegram_id) REFERENCES users(telegram_id) ON DELETE CASCADE)""")
         setting_columns = {row[1] for row in await (await db.execute("PRAGMA table_info(user_settings)")).fetchall()}
-        if "bell_shift" not in setting_columns:
-            await db.execute("ALTER TABLE user_settings ADD COLUMN bell_shift TEXT NOT NULL DEFAULT '1'")
         await db.execute("INSERT OR IGNORE INTO user_settings(telegram_id) SELECT telegram_id FROM users")
         await db.execute("""CREATE TABLE IF NOT EXISTS sports_subscriptions(
             telegram_id INTEGER NOT NULL, section_id TEXT NOT NULL,
@@ -141,7 +138,7 @@ async def all_users():
 DEFAULT_USER_SETTINGS = {
     "hidden_menu": [], "notifications_enabled": 1, "schedule_changes": 1,
     "cancellations": 1, "transfers": 1, "teacher_changes": 1,
-    "sports_reminders": 0, "class_bells": 0, "bell_shift": "1",
+    "sports_reminders": 0, "class_bells": 0,
 }
 
 
@@ -151,7 +148,7 @@ async def get_user_settings(uid):
     if not row:
         return dict(DEFAULT_USER_SETTINGS)
     names = ["telegram_id", "hidden_menu", "notifications_enabled", "schedule_changes",
-             "cancellations", "transfers", "teacher_changes", "sports_reminders", "class_bells", "bell_shift"]
+             "cancellations", "transfers", "teacher_changes", "sports_reminders", "class_bells"]
     values = dict(zip(names, row))
     try:
         values["hidden_menu"] = json.loads(values["hidden_menu"] or "[]")
@@ -166,10 +163,6 @@ async def update_user_setting(uid, key, value):
         raise ValueError("Неизвестная настройка пользователя.")
     if key == "hidden_menu":
         value = json.dumps(sorted(set(value or [])), ensure_ascii=False)
-    elif key == "bell_shift":
-        value = str(value)
-        if value not in {"1", "2"}:
-            raise ValueError("Смена должна быть 1 или 2.")
     else:
         value = int(bool(value))
     async with aiosqlite.connect(_database_path()) as db:
@@ -254,10 +247,10 @@ async def users_with_preference(preference):
     if preference not in {"class_bells", "sports_reminders"}:
         raise ValueError("Неизвестный тип уведомления.")
     async with aiosqlite.connect(_database_path()) as db:
-        rows = await (await db.execute(f"""SELECT u.telegram_id,u.group_name,u.college_id,u.college_branch,p.bell_shift
+        rows = await (await db.execute(f"""SELECT u.telegram_id,u.group_name,u.college_id,u.college_branch
             FROM users u JOIN user_settings p ON p.telegram_id=u.telegram_id
             WHERE p.notifications_enabled=1 AND p.{preference}=1 AND u.group_name IS NOT NULL""")).fetchall()
-    return [{"telegram_id": r[0], "group_name": r[1], "college_id": r[2], "college_branch": r[3], "bell_shift": r[4]} for r in rows]
+    return [{"telegram_id": r[0], "group_name": r[1], "college_id": r[2], "college_branch": r[3]} for r in rows]
 
 async def save_announcement(uid, group, body, college_id="kuzpk"):
     async with aiosqlite.connect(_database_path()) as db:

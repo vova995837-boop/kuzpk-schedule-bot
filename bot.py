@@ -348,7 +348,6 @@ async def show_settings(target, uid, page="home"):
         for key, label in NOTIFICATION_LABELS.items():
             enabled = bool(prefs[key])
             buttons.append([InlineKeyboardButton(text=f"{'✅' if enabled else '▫️'} {label}", callback_data=f"settings|notify_toggle|{key}")])
-        buttons.append([InlineKeyboardButton(text=f"🕘 Смена для звонков: {prefs['bell_shift']}", callback_data="settings|bell_shift")])
         buttons += [[InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")]]
         text = "🔔 <b>Уведомления</b>\n\nРасписание и напоминания приходят только по выбранной основной группе и секциям. Начало пар и перемены можно включить отдельно."
     else:
@@ -373,10 +372,6 @@ async def settings_action(c: CallbackQuery):
         key = args[0]
         prefs = await get_user_settings(c.from_user.id)
         await update_user_setting(c.from_user.id, key, not bool(prefs[key]))
-        await show_settings(c.message, c.from_user.id, "notifications")
-    elif action == "bell_shift":
-        prefs = await get_user_settings(c.from_user.id)
-        await update_user_setting(c.from_user.id, "bell_shift", "2" if prefs["bell_shift"] == "1" else "1")
         await show_settings(c.message, c.from_user.id, "notifications")
     elif action in ("home", "menu", "notifications"):
         await show_settings(c.message, c.from_user.id, action)
@@ -2101,10 +2096,10 @@ def _bell_pair_number(row):
     return int(match.group(1)) if match else None
 
 
-def _day_bell_rows(rows, day, shift):
+def _day_bell_rows(rows, day):
     weekday = ("понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье")[day.weekday()]
     matched = [r for r in rows if weekday in str(r.get("section", "")).casefold()
-               and str(r.get("shift", "")).strip().casefold().startswith(f"{shift} смена")]
+               and _bell_pair_number(r) is not None]
     # Prefer a day-specific rule over combined-weekday or curator-hour variants.
     matched.sort(key=lambda r: (weekday not in str(r.get("section", "")).casefold(), len(str(r.get("section", "")))))
     return matched
@@ -2128,43 +2123,59 @@ async def _process_class_bell_notifications(now):
         schedule_rows, bells = cache[cache_key]
         if not schedule_rows or not bells:
             continue
-        pair_numbers = {int(str(row.get("lesson_no"))) for row in schedule_rows if str(row.get("lesson_no", "")).isdigit()}
-        for bell in _day_bell_rows(bells, today, user.get("bell_shift", "1")):
-            pair = _bell_pair_number(bell)
-            if pair not in pair_numbers:
+        lessons_by_pair = {}
+        for row in schedule_rows:
+            try:
+                lessons_by_pair.setdefault(int(str(row.get("lesson_no") or "")), []).append(row)
+            except ValueError:
                 continue
-            segments = []
-            first_times = re.findall(r"\d{1,2}:\d{2}", str(bell.get("first") or ""))
-            second_times = re.findall(r"\d{1,2}:\d{2}", str(bell.get("second") or ""))
-            if first_times:
-                segments.append((first_times[0], "Пара", None))
-                if str(bell.get("break_1") or "").strip() not in ("", "—", "-"):
-                    try: duration = int(re.search(r"\d+", str(bell["break_1"])).group())
-                    except (AttributeError, ValueError): duration = 0
-                    if duration: segments.append((first_times[-1], "Перемена", duration))
-            if second_times:
-                segments.append((second_times[0], "Пара продолжается", None))
-                if str(bell.get("break_2") or "").strip() not in ("", "—", "-"):
-                    try: duration = int(re.search(r"\d+", str(bell["break_2"])).group())
-                    except (AttributeError, ValueError): duration = 0
-                    if duration: segments.append((second_times[-1], "Перемена", duration))
-            for raw_time, label, duration in segments:
-                event_time = _time_value(raw_time)
-                if event_time != now.time().replace(second=0, microsecond=0):
-                    continue
-                if label == "Пара":
-                    description = f"Пара {pair} начинается"
-                elif label.startswith("Пара"):
-                    description = f"Начинается вторая часть пары {pair}"
-                else:
-                    description = f"Началась перемена на {duration} мин."
-                key = f"class:{user['telegram_id']}:{today}:{pair}:{label}:{raw_time}"
-                try:
-                    if not await claim_notification(key):
+        if not lessons_by_pair:
+            continue
+        # Use the first lesson's shift label for each actual pair when available;
+        # if the source does not label shifts, the pair itself still determines its bell slot.
+        for pair in sorted(lessons_by_pair):
+            group_shift = next((str(row.get("shift") or "").strip() for row in lessons_by_pair[pair]
+                                if str(row.get("shift") or "").strip()), "")
+            day_bells = _day_bell_rows(bells, today)
+            if group_shift:
+                shifted = [bell for bell in day_bells
+                           if not str(bell.get("shift") or "").strip()
+                           or str(bell.get("shift") or "").strip().casefold() in group_shift.casefold()]
+                day_bells = shifted or day_bells
+            matching_bells = [bell for bell in day_bells if _bell_pair_number(bell) == pair]
+            for bell in matching_bells[:1]:
+                segments = []
+                first_times = re.findall(r"\d{1,2}:\d{2}", str(bell.get("first") or ""))
+                second_times = re.findall(r"\d{1,2}:\d{2}", str(bell.get("second") or ""))
+                if first_times:
+                    segments.append((first_times[0], "Пара", None))
+                    if str(bell.get("break_1") or "").strip() not in ("", "—", "-"):
+                        try: duration = int(re.search(r"\d+", str(bell["break_1"])).group())
+                        except (AttributeError, ValueError): duration = 0
+                        if duration: segments.append((first_times[-1], "Перемена", duration))
+                if second_times:
+                    segments.append((second_times[0], "Пара продолжается", None))
+                    if str(bell.get("break_2") or "").strip() not in ("", "—", "-"):
+                        try: duration = int(re.search(r"\d+", str(bell["break_2"])).group())
+                        except (AttributeError, ValueError): duration = 0
+                        if duration: segments.append((second_times[-1], "Перемена", duration))
+                for raw_time, label, duration in segments:
+                    event_time = _time_value(raw_time)
+                    if event_time != now.time().replace(second=0, microsecond=0):
                         continue
-                    await bot.send_message(user["telegram_id"], f"🐶 <b>Тяф! {escape(description)}</b>\n\n🎓 {escape(group)} · {raw_time}\nУдачного дня ❤️")
-                except Exception:
-                    logging.exception("Не удалось отправить напоминание о звонке пользователю %s", user["telegram_id"])
+                    if label == "Пара":
+                        description = f"Пара {pair} начинается"
+                    elif label.startswith("Пара"):
+                        description = f"Начинается вторая часть пары {pair}"
+                    else:
+                        description = f"Началась перемена на {duration} мин."
+                    key = f"class:{user['telegram_id']}:{today}:{pair}:{label}:{raw_time}"
+                    try:
+                        if not await claim_notification(key):
+                            continue
+                        await bot.send_message(user["telegram_id"], f"🐶 <b>Тяф! {escape(description)}</b>\n\n🎓 {escape(group)} · {raw_time}\nУдачного дня ❤️")
+                    except Exception:
+                        logging.exception("Не удалось отправить напоминание о звонке пользователю %s", user["telegram_id"])
 
 
 async def _process_sports_reminders(now):
