@@ -72,7 +72,7 @@
 .ag-subhead>span { white-space: nowrap; color: var(--muted); font-size: .82rem; }
 .ag-lines, .ag-index { padding: 0; margin: 0; list-style: none; }
 .ag-line { display: grid; grid-template-columns: 54px minmax(0,1fr); gap: 12px; }
-.ag-time { padding-top: 15px; display: flex; flex-direction: column; align-items: flex-end; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.ag-time { white-space: nowrap; padding-top: 15px; display: flex; flex-direction: column; align-items: flex-end; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .ag-time b { font-size: .99rem; letter-spacing: -.045em; }
 .ag-time small { font-size: .78rem; color: var(--muted); }
 .ag-entry { position: relative; min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) auto; align-content: start; gap: 4px; border-left: 1px solid var(--line); padding: 15px 0 16px 18px; }
@@ -121,7 +121,7 @@
   .ag-selector-row { margin: 15px 0 7px; }
   .ag-ticket { grid-template-columns: minmax(0,1fr); gap: 12px; }
   .ag-ticket-stub { flex-direction: row; justify-content: space-between; align-items: center; gap: 8px; padding: 12px 0 0; border-inline-start: 0; border-top: 1px dashed #687273; }
-  .ag-line { grid-template-columns: 40px minmax(0,1fr); gap: 9px; }
+  .ag-line { grid-template-columns: max(48px, 5ch) minmax(0,1fr); gap: 9px; }
   .ag-gap { margin-left: 49px; }
   .ag-entry { padding-left: 13px; }
 }
