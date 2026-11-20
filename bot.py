@@ -2256,9 +2256,10 @@ async def miniapp_data(request):
         monday = day - timedelta(days=day.weekday())
         week = await get_week_schedule(selected, monday, college, branch)
         payload = {d.isoformat(): rows for d, rows in week.items()}
+        groups = await list_groups(college)
         return web.json_response({"section": section, "college": college, "group": selected,
                                   "date": day.isoformat(), "week_start": monday.isoformat(),
-                                  "days": payload, "items": await list_groups(college)})
+                                  "days": payload, "items": groups, "groups": groups})
     if section == "history":
         selected = request.query.get("group", "").strip() or user.get("group_name")
         snapshots = await get_auto_schedule_snapshots(college)
@@ -2273,6 +2274,9 @@ async def miniapp_data(request):
         items = [name for name in names if query in name.casefold()][:100]
         selected = request.query.get("name", "")
         rows = await get_entity_schedule(kind, selected, day, college, branch) if selected in names else []
+        selected_group = (request.query.get("group", "").strip() or user.get("group_name")) if kind == "teacher" else ""
+        if selected_group:
+            rows = [row for row in rows if str(row.get("group", "")).strip().casefold() == selected_group.casefold()]
     else:
         selected = request.query.get("group", "").strip() or user.get("group_name")
         if not selected:
@@ -2284,8 +2288,9 @@ async def miniapp_data(request):
             items = [name for name in items if q in name.casefold()][:100]
     rows.sort(key=lambda item: (int(item.get("lesson_no") or 0) if str(item.get("lesson_no") or "").isdigit() else 999,
                                 str(item.get("start") or "")))
-    return web.json_response({"section": section, "college": college, "group": selected if section == "schedule" else user.get("group_name"),
-                              "date": day.isoformat(), "items": items, "rows": rows})
+    groups = items if section == "schedule" else await list_groups(college)
+    return web.json_response({"section": section, "college": college, "group": selected if section == "schedule" else (selected_group if section in ("teachers", "rooms") else user.get("group_name")),
+                              "date": day.isoformat(), "items": items, "groups": groups, "rows": rows})
 
 
 async def start_miniapp_server():
