@@ -1,0 +1,115 @@
+.nb {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+  padding-bottom: 1.5rem;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.nb button, .nb input, .nb select, .nb textarea { font: inherit; }
+.nb button { cursor: pointer; color: inherit; }
+.nb svg { width: 19px; height: 19px; flex: none; }
+.nb-heading { margin: 12px 0 30px; }
+.nb h1 { margin: 0; font-size: clamp(2.25rem, 8vw, 3.85rem); line-height: 1.03; letter-spacing: -.055em; }
+.nb h2 { font-size: 1.2rem; line-height: 1.25; letter-spacing: -.035em; margin: 0; }
+.nb-heading p, .nb-empty { color: var(--muted); font-size: .88rem; line-height: 1.5; margin: .5rem 0; }
+.nb-block {
+  border-top: 2px solid var(--ink);
+  padding: 3px 0 17px;
+  margin: 16px 0;
+}
+.nb-section-head, .nb-row, .nb-entry, .nb-controls, .nb-action,
+.nb-lesson, .nb-task, .nb-icon, .nb-metric { display: flex; align-items: center; }
+.nb-section-head { justify-content: space-between; gap: 8px; }
+.nb-action {
+  gap: .5rem;
+  justify-content: center;
+  min-height: 44px;
+  padding: .55rem .9rem;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+  font-size: .85rem;
+  font-weight: 650;
+}
+.nb .nb-primary { background: var(--navy); border-color: var(--navy); color: white; }
+.nb .nb-primary svg { color: var(--accent); }
+.nb-block > .nb-primary { margin-top: .65rem; }
+.nb .nb-quiet, .nb .nb-back {
+  padding: .4rem .15rem;
+  background: none;
+  border: none;
+  font-size: .82rem;
+}
+.nb .nb-quiet { flex-direction: row-reverse; }
+.nb .nb-back { margin-bottom: .5rem; }
+.nb-row {
+  border-bottom: 1px solid var(--line);
+  gap: 12px;
+  min-height: 55px;
+  padding: 6px 0;
+  justify-content: space-between;
+}
+.nb-row strong, .nb-menu strong { font-size: .97rem; font-weight: 650; line-height: 1.4; }
+.nb-row small, .nb-row em, .nb-menu small {
+  display: block;
+  color: var(--muted);
+  font-size: .79rem;
+  line-height: 1.4;
+  margin-top: .2rem;
+}
+.nb-row em { font-style: normal; white-space: pre-wrap; }
+.nb-lesson, .nb-task, .nb-entry { flex: 1; min-width: 0; gap: 12px; }
+.nb-lesson, .nb-task { min-height: 44px; padding: 4px 0; }
+.nb-lesson, .nb-icon { background: transparent; border: none; text-align: left; }
+.nb-lesson > svg { color: var(--muted); }
+.nb-task { cursor: pointer; }
+.nb-task input { accent-color: var(--navy); width: 21px; height: 21px; flex: none; margin: 0; }
+.nb-task input:checked + span strong { color: var(--muted); text-decoration: line-through; }
+.nb .nb-icon { width: 44px; height: 44px; justify-content: center; color: var(--muted); }
+.nb-icon:hover, .nb-action:hover, .nb-menu-item:hover { filter: brightness(.9); }
+.nb-menu { display: grid; border-top: 1px solid var(--ink); }
+.nb-menu-item {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  align-items: center;
+  grid-template-columns: 24px minmax(0,1fr) auto 16px;
+  gap: .6rem;
+  padding: 9px .1rem;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  text-align: left;
+}
+.nb-menu-item:last-child { grid-template-columns: 24px minmax(0,1fr) 16px; }
+.nb-menu-item > span, .nb-icon { font-variant-numeric: tabular-nums; }
+.nb-menu-item > svg:last-child { width: 16px; }
+.nb-form { width: 100%; max-width: 32rem; display: grid; gap: 1rem; }
+.nb-form h2 { margin: .4rem 0; }
+.nb-form label {
+  display: grid;
+  gap: .4rem;
+  min-width: 0;
+  font-size: .85rem;
+  font-weight: 650;
+}
+.nb .nb-form :is(input,select,textarea) {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: 46px;
+  padding: .65rem .75rem;
+  font-size: 1rem;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+}
+.nb-form textarea { resize: vertical; }
+.nb-controls { gap: .5rem; flex-wrap: wrap; }
+.nb .nb-remove { margin-inline-start: auto; background: transparent; border: 0; color: #91492f; }
+.nb-metric { gap: 1rem; justify-content: space-between; border-top: 2px solid var(--ink); padding: .75rem 0; margin-bottom: 1rem; }
+.nb-metric strong { font-size: 2.15rem; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.nb-grade { display: grid; place-items: center; width: 34px; height: 34px; background: var(--accent); border-radius: 6px; color: var(--navy); }
+.nb :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
