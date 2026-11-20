@@ -167,6 +167,40 @@ def kemtip_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+KEMTIP_DAYS = ("Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота")
+
+
+async def kemtip_group_card(data, parts):
+    from kemtip_grid import catalogue, lessons, week_start
+    groups = await asyncio.to_thread(catalogue, data)
+    if not groups:
+        raise ValueError("No group headers found")
+    if not parts:
+        keys = sorted(groups)
+        buttons = [kemtip_button(key, f"classes|g|{key}|0") for key in keys]
+        return "🎓 <b>КемТИПиСУ · Расписание занятий</b>\nВыбери группу.", [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+    _, group, raw_day = parts
+    day = int(raw_day)
+    entries = await asyncio.to_thread(lessons, data, group, day)
+    text = f"📅 <b>{KEMTIP_DAYS[day]}</b>\n🎓 <b>Группа {escape(group)} · КемТИПиСУ</b>"
+    monday = await asyncio.to_thread(week_start, data)
+    if monday:
+        text = text.replace(KEMTIP_DAYS[day], KEMTIP_DAYS[day] + ", " + (monday + timedelta(days=day)).strftime("%d.%m.%Y"), 1)
+    for subject, room in entries:
+        discipline, sep, teacher = subject.rpartition(" · ")
+        if sep and re.search(r"[А-ЯЁ]\.\s*[А-ЯЁ]\.", teacher):
+            text += f"\n\n<blockquote>📚 <b>{escape(discipline)}</b>\n👨‍🏫 {escape(teacher)}"
+        else:
+            text += f"\n\n<blockquote>📚 {escape(subject)}"
+        if room:
+            text += f"\n🚪 {escape(room)}"
+        text += "</blockquote>"
+    if not entries:
+        text += "\nНа этот день занятия не распознаны."
+    days = [kemtip_button(("• " if n == day else "") + name[:2], f"classes|g|{group}|{n}") for n,name in enumerate(("Пн","Вт","Ср","Чт","Пт","Сб"))]
+    return text, [days[:3], days[3:], [kemtip_button("🎓 Выбрать группу", "classes")]]
+
+
 @dp.callback_query(F.data.startswith("kemtip|"))
 async def kemtip_reader(c: CallbackQuery):
     _, kind, *parts = c.data.split("|")
@@ -177,7 +211,10 @@ async def kemtip_reader(c: CallbackQuery):
     rows = []
     try:
         docs = await asyncio.to_thread(kemtip.documents, kind)
-        if not parts and len(docs) > 1:
+        if kind == "classes" and (not parts or parts[0] == "g"):
+            text, rows = await kemtip_group_card(docs[0][1], parts)
+            rows.append([kemtip_button("Все страницы расписания", "classes|0|0|0")])
+        elif not parts and len(docs) > 1:
             text = f"<b>{label} · КемТИПиСУ</b>\nВыбери документ."
             rows = [[kemtip_button(name, f"{kind}|{i}|0|0")] for i, (name, _) in enumerate(docs)]
         else:
@@ -187,6 +224,17 @@ async def kemtip_reader(c: CallbackQuery):
             import textwrap
             chunks = textwrap.wrap(content, 3100, replace_whitespace=False) or ["Текст этой страницы не удалось распознать."]
             text = f"<b>{escape(title)}</b> · стр. {page+1}/{count}\n\n{escape(chunks[part])}"
+            if kind == "bells":
+                display = []
+                for line in content.splitlines():
+                    match = re.fullmatch(r"(.+?)\s+(\d{1,2})[.:](\d{2})\s*[-–]\s*(\d{1,2})[.:](\d{2})", line.strip())
+                    if match:
+                        label, h1, m1, h2, m2 = match.groups()
+                        display.append(f"{escape(' '.join(label.split()))}    <b>{h1.zfill(2)}:{m1}–{h2.zfill(2)}:{m2}</b>")
+                    elif "смена" in line.lower():
+                        display.append(f"\n🔔 <b>{escape(line.strip())}</b>")
+                if display and any("–" in line for line in display) and len(chunks) == 1:
+                    text = "🔔 <b>" + escape(title) + "</b>\n\n" + "\n".join(display)
             nav = []
             for name, dest in (("← Страница", page-1), ("Страница →", page+1)):
                 if 0 <= dest < count:
@@ -201,6 +249,8 @@ async def kemtip_reader(c: CallbackQuery):
         logging.exception("Could not read KемТИПиСУ timetable")
         text = "Не удалось открыть страницу расписания."
         rows = [[InlineKeyboardButton(text="Повторить", callback_data=c.data)]]
+        if kind == "classes":
+            rows.append([kemtip_button("Читать по страницам", "classes|0|0|0")])
     rows = [row for row in rows if row]
     rows.append([InlineKeyboardButton(text="Источник", url=source),
                  InlineKeyboardButton(text="Назад к расписаниям", callback_data="menu|schedule")])
