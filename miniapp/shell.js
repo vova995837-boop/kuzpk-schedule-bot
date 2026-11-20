@@ -40,12 +40,13 @@
     return Object.assign(new Error(message), { status });
   }
 
-  async function api(params, signal) {
+  async function api(params, signal, exportDay = false) {
     const initData = window.Telegram?.WebApp?.initData;
     if (!initData) throw errorWithStatus('Открой мини-приложение из меню бота в Telegram.', 401);
-    const url = new URL('/api/miniapp', window.location.origin);
+    const url = new URL(exportDay ? '/api/miniapp/export' : '/api/miniapp', window.location.origin);
     url.search = new URLSearchParams(params);
     const response = await fetch(url, {
+      method: exportDay ? 'POST' : 'GET',
       headers: { 'X-Telegram-Init-Data': initData },
       signal,
       cache: 'no-store'

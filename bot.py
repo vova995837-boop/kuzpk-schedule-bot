@@ -2227,7 +2227,7 @@ async def background_tasks():
 
 
 async def miniapp_data(request):
-    """Read-only schedule API for Telegram Mini App; accepts only Telegram initData identity."""
+    """Serve the signed-in Telegram user’s timetable and requested exports."""
     from aiogram.utils.web_app import safe_parse_webapp_init_data
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     if not init_data:
@@ -2249,6 +2249,21 @@ async def miniapp_data(request):
         day = date.fromisoformat(day_raw)
     except ValueError:
         return web.json_response({"error": "Неверная дата"}, status=400)
+    if request.method == "POST":
+        group = request.query.get("group", "").strip() or user.get("group_name")
+        if not group:
+            return web.json_response({"error": "Выбери группу для выгрузки"}, status=409)
+        rows = await get_schedule(group, day, college, branch)
+        if not rows:
+            return web.json_response({"error": "На выбранный день пар нет"}, status=409)
+        from schedule_calendar import day_calendar
+        document = BufferedInputFile(day_calendar(rows, group, day), filename=f"Расписание-{day}.ics")
+        try:
+            await bot.send_document(uid, document, caption=f"Расписание · {escape(group)} · {day:%d.%m.%Y}")
+        except Exception:
+            logging.exception("Mini App calendar delivery failed")
+            return web.json_response({"error": "Не удалось подтвердить отправку. Проверь чат со Степашей."}, status=502)
+        return web.json_response({"sent": True})
     if section == "week":
         selected = request.query.get("group", "").strip() or user.get("group_name")
         if not selected:
@@ -2296,6 +2311,7 @@ async def miniapp_data(request):
 async def start_miniapp_server():
     app = web.Application()
     app.router.add_get("/api/miniapp", miniapp_data)
+    app.router.add_post("/api/miniapp/export", miniapp_data)
     async def miniapp_index(_request):
         return web.FileResponse(os.path.join(os.path.dirname(__file__), "miniapp", "index.html"))
     app.router.add_get("/", miniapp_index)

@@ -96,7 +96,7 @@ window.Notebook = (() => {
       ${menuItem('grades', 'Оценки', 'grid', average())}
       ${menuItem('events', 'События', 'calendar', records('events').length || '')}
       <button type="button" class="nb-menu-item" ${snapshot?.rows?.length ? 'data-nb-export' : 'data-nb-schedule'}>
-        ${icon('download')}<span><strong>Экспорт дня</strong><small>${snapshot?.rows?.length ? esc([dayLabel(snapshot.date), snapshot.group].filter(Boolean).join(' · ')) + ' · .ics' : 'Выбери день с парами в расписании'}</small></span>${icon('chevron')}</button>
+        ${icon('download')}<span><strong>Выгрузить расписание в чат</strong><small>${snapshot?.rows?.length ? esc([dayLabel(snapshot.date), snapshot.group].filter(Boolean).join(' · ')) + ' · .ics' : 'Выбери день с парами в расписании'}</small></span>${icon('chevron')}</button>
       </section>`;
   }
   function form(type) {
@@ -169,7 +169,7 @@ window.Notebook = (() => {
       } else if ('nbUnmark' in d) {
         const key = saved[Number(d.nbUnmark)].key;
         persist('saved', records('saved').filter(value => value !== key));
-      } else if ('nbExport' in d) { exportDay(); return; }
+      } else if ('nbExport' in d) { exportDay(btn); return; }
       else if ('nbSchedule' in d) { app().navigate('day'); return; }
       else return;
       render(Boolean(editor));
@@ -212,42 +212,21 @@ window.Notebook = (() => {
     } catch { app().notify('Не удалось сохранить запись на устройстве.'); }
   }
 
-  function exportDay() {
+  let sending = false;
+  async function exportDay(button) {
     const day = app().getExport();
-    if (!day?.rows?.length) return app().notify('Открой день с занятиями в расписании.');
-    const date = day.date.replace(/-/g, '');
-    const text = v => String(v ?? '').replace(/\\/g, '\\\\').replace(/\r\n|\r|\n/g, '\\n').replace(/[;,]/g, c => '\\' + c);
-    const time = v => {
-      const m = /^(\d{1,2}):(\d{2})/.exec(String(v || '').trim());
-      return m ? date + 'T' + m[1].padStart(2, '0') + m[2] + '00' : '';
-    };
-    const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '');
-    const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Stepasha//Planner//RU', 'CALSCALE:GREGORIAN'];
-    day.rows.forEach((row, index) => {
-      const start = time(row.start), end = time(row.end);
-      const group = encodeURIComponent(day.group || row.group || 'group');
-      lines.push('BEGIN:VEVENT', `UID:${date}-${group}-${index}@stepasha`, 'DTSTAMP:' + stamp,
-        start ? 'DTSTART:' + start : 'DTSTART;VALUE=DATE:' + date);
-      if (start && end > start) lines.push('DTEND:' + end);
-      lines.push('SUMMARY:' + text(row.subject || row.lesson || 'Занятие'), 'LOCATION:' + text(row.room),
-        'DESCRIPTION:' + text([row.teacher, row.group].filter(Boolean).join(' · ')), 'END:VEVENT');
-    });
-    lines.push('END:VCALENDAR');
-    const encoder = new TextEncoder();
-    const folded = lines.map(line => {
-      let count = 0, output = '';
-      for (const char of line) {
-        const bytes = encoder.encode(char).length;
-        if (count + bytes > 75) { output += '\r\n '; count = 1; }
-        output += char; count += bytes;
-      }
-      return output;
-    }).join('\r\n') + '\r\n';
-    const url = URL.createObjectURL(new Blob([folded], { type: 'text/calendar;charset=utf-8' }));
-    const link = document.createElement('a');
-    link.href = url; link.download = `stepasha-${day.date}.ics`;
-    document.body.append(link); link.click(); link.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    if (!day?.rows?.length || sending) return;
+    sending = true;
+    button.disabled = true;
+    try {
+      await app().api({ date: day.date, group: day.group }, undefined, true);
+      app().notify('Файл расписания отправлен в чат со Степашей.');
+    } catch (error) {
+      app().notify(error.message || 'Не удалось отправить файл.');
+    } finally {
+      button.disabled = false;
+      sending = false;
+    }
   }
 
   return { open() { page = 'home'; editor = null; render(); } };
