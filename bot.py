@@ -149,18 +149,62 @@ COLLEGES = {"kemtip": "КемТИПиСУ", "kuzpk": "КузПК", "kuztagis": "
 COLLEGE_CITIES = {"kemtip": "Кемерово", "kuzpk": "Кемерово", "kuztagis": "Кемерово", "pgt": "Прокопьевск", "yamk": "Салехард"}
 COLLEGE_REGIONS = {"kemtip": "kuzbass", "kuzpk": "kuzbass", "kuztagis": "kuzbass", "pgt": "kuzbass", "yamk": "yanao"}
 
-KEMTIP_SCHEDULES = {
-    "Расписание занятий": "https://cloud.42tip.ru/index.php/s/yJbscbdKBWPCPGN",
-    "Расписание экзаменов": "https://cloud.42tip.ru/index.php/s/rS82twwmtdSJknj",
-    "Расписание звонков": "https://cloud.42tip.ru/index.php/s/Ysno5JbRGGm945p",
-    "Сайт колледжа": "https://42tip.kemobl.ru/studentam/raspisanie/",
-}
+import kemtip
+
+KEMTIP_SITE = "https://42tip.kemobl.ru/studentam/raspisanie/"
+KEMTIP_SCHEDULES = {label: url for label, url in kemtip.SCHEDULES.values()}
+KEMTIP_SCHEDULES["Сайт колледжа"] = KEMTIP_SITE
+
+
+def kemtip_button(label, path):
+    return InlineKeyboardButton(text=label, callback_data="kemtip|" + path)
 
 
 def kemtip_keyboard():
-    rows = [[InlineKeyboardButton(text=label, url=url)] for label, url in KEMTIP_SCHEDULES.items()]
+    rows = [[kemtip_button(label, key)] for key, (label, _) in kemtip.SCHEDULES.items()]
+    rows.append([InlineKeyboardButton(text="Сайт колледжа", url=KEMTIP_SITE)])
     rows.append([InlineKeyboardButton(text="↩️ Выбрать колледж", callback_data="menu|college")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@dp.callback_query(F.data.startswith("kemtip|"))
+async def kemtip_reader(c: CallbackQuery):
+    _, kind, *parts = c.data.split("|")
+    await c.answer("Открываю расписание…")
+    if kind not in kemtip.SCHEDULES:
+        return
+    label, source = kemtip.SCHEDULES[kind]
+    rows = []
+    try:
+        docs = await asyncio.to_thread(kemtip.documents, kind)
+        if not parts and len(docs) > 1:
+            text = f"<b>{label} · КемТИПиСУ</b>\nВыбери документ."
+            rows = [[kemtip_button(name, f"{kind}|{i}|0|0")] for i, (name, _) in enumerate(docs)]
+        else:
+            doc, page, part = map(int, parts or ("0", "0", "0"))
+            title, data = docs[doc]
+            content, count = await asyncio.to_thread(kemtip.read_page, data, page)
+            import textwrap
+            chunks = textwrap.wrap(content, 3100, replace_whitespace=False) or ["Текст этой страницы не удалось распознать."]
+            text = f"<b>{escape(title)}</b> · стр. {page+1}/{count}\n\n{escape(chunks[part])}"
+            nav = []
+            for name, dest in (("← Страница", page-1), ("Страница →", page+1)):
+                if 0 <= dest < count:
+                    nav.append(kemtip_button(name, f"{kind}|{doc}|{dest}|0"))
+            if nav:
+                rows.append(nav)
+            rows.append([kemtip_button(name, f"{kind}|{doc}|{page}|{n}") for name, n in
+                         (("← Текст", part-1), ("Текст →", part+1)) if 0 <= n < len(chunks)])
+            if len(docs) > 1:
+                rows.append([kemtip_button("К документам", kind)])
+    except Exception:
+        logging.exception("Could not read KемТИПиСУ timetable")
+        text = "Не удалось открыть страницу расписания."
+        rows = [[InlineKeyboardButton(text="Повторить", callback_data=c.data)]]
+    rows = [row for row in rows if row]
+    rows.append([InlineKeyboardButton(text="Источник", url=source),
+                 InlineKeyboardButton(text="Назад к расписаниям", callback_data="menu|schedule")])
+    await safe_edit(c.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
 def college_label(college_id):
