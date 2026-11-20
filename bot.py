@@ -2249,6 +2249,23 @@ async def miniapp_data(request):
         day = date.fromisoformat(day_raw)
     except ValueError:
         return web.json_response({"error": "Неверная дата"}, status=400)
+    if section == "week":
+        selected = request.query.get("group", "").strip() or user.get("group_name")
+        if not selected:
+            return web.json_response({"error": "Выбери основную группу в боте"}, status=409)
+        monday = day - timedelta(days=day.weekday())
+        week = await get_week_schedule(selected, monday, college, branch)
+        payload = {d.isoformat(): rows for d, rows in week.items()}
+        return web.json_response({"section": section, "college": college, "group": selected,
+                                  "date": day.isoformat(), "week_start": monday.isoformat(),
+                                  "days": payload, "items": await list_groups(college)})
+    if section == "history":
+        selected = request.query.get("group", "").strip() or user.get("group_name")
+        snapshots = await get_auto_schedule_snapshots(college)
+        history = [{"date": d, "rows": rows} for (group_name, d), rows in snapshots.items()
+                   if group_name == selected]
+        history.sort(key=lambda item: item["date"], reverse=True)
+        return web.json_response({"section": section, "group": selected, "history": history[:30]})
     if section == "teachers" or section == "rooms":
         kind = "teacher" if section == "teachers" else "room"
         query = request.query.get("q", "").strip().casefold()
