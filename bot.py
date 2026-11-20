@@ -2274,6 +2274,9 @@ async def miniapp_data(request):
 async def start_miniapp_server():
     app = web.Application()
     app.router.add_get("/api/miniapp", miniapp_data)
+    async def miniapp_index(_request):
+        return web.FileResponse(os.path.join(os.path.dirname(__file__), "miniapp", "index.html"))
+    app.router.add_get("/", miniapp_index)
     app.router.add_static("/", path=os.path.join(os.path.dirname(__file__), "miniapp"), show_index=False)
     runner = web.AppRunner(app)
     await runner.setup()
