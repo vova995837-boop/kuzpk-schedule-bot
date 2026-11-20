@@ -2253,17 +2253,10 @@ async def miniapp_data(request):
         group = request.query.get("group", "").strip() or user.get("group_name")
         if not group:
             return web.json_response({"error": "Выбери группу для выгрузки"}, status=409)
-        rows = await get_schedule(group, day, college, branch)
-        if not rows:
-            return web.json_response({"error": "На выбранный день пар нет"}, status=409)
-        from schedule_calendar import day_calendar
-        document = BufferedInputFile(day_calendar(rows, group, day), filename=f"Расписание-{day}.ics")
-        try:
-            await bot.send_document(uid, document, caption=f"Расписание · {escape(group)} · {day:%d.%m.%Y}")
-        except Exception:
-            logging.exception("Mini App calendar delivery failed")
-            return web.json_response({"error": "Не удалось подтвердить отправку. Проверь чат со Степашей."}, status=502)
-        return web.json_response({"sent": True})
+        from sheets import group_schedule_days
+        days = await group_schedule_days(group, college, branch)
+        return web.json_response({"college": college, "branch": branch, "group": group,
+                                  "days": {d.isoformat(): rows for d, rows in days.items() if rows}})
     if section == "week":
         selected = request.query.get("group", "").strip() or user.get("group_name")
         if not selected:

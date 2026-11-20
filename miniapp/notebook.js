@@ -1,6 +1,6 @@
 /* Personal records keep the storage formats used by earlier Mini App releases. */
 window.Notebook = (() => {
-  const keys = { tasks: 'stepasha-tasks', grades: 'stepasha-grades', events: 'stepasha-events', saved: 'stepasha-favs' };
+  const keys = { archives: 'stepasha-group-archives', tasks: 'stepasha-tasks', grades: 'stepasha-grades', events: 'stepasha-events', saved: 'stepasha-favs' };
   const titles = { home: 'Блокнот', tasks: 'Задания', grades: 'Оценки', events: 'События', saved: 'Пары и заметки' };
   let page = 'home';
   let editor = null;
@@ -95,8 +95,12 @@ window.Notebook = (() => {
       <section class="nb-menu" aria-label="Учебные инструменты">
       ${menuItem('grades', 'Оценки', 'grid', average())}
       ${menuItem('events', 'События', 'calendar', records('events').length || '')}
-      <button type="button" class="nb-menu-item" ${snapshot?.rows?.length ? 'data-nb-export' : 'data-nb-schedule'}>
-        ${icon('download')}<span><strong>Выгрузить расписание в чат</strong><small>${snapshot?.rows?.length ? esc([dayLabel(snapshot.date), snapshot.group].filter(Boolean).join(' · ')) + ' · .ics' : 'Выбери день с парами в расписании'}</small></span>${icon('chevron')}</button>
+      <button type="button" class="nb-menu-item" data-nb-export>
+        ${icon('download')}<span><strong>Сохранить расписание в блокнот</strong><small>${esc(snapshot?.group || 'Основная группа')} · Все доступные даты</small></span></button>
+      </section><section class="nb-block"><h2>Расписания групп</h2>
+      ${records('archives').map(a => `<details><summary>${esc(a.group)} · ${esc(a.college)} · дней: ${Object.keys(a.days).length}</summary>
+        ${Object.entries(a.days).map(([d, rows]) => `<details><summary>${esc(dayLabel(d))} · ${esc(d.slice(0,4))}</summary>
+        ${rows.map(r => `<p><strong>${esc(r.lesson_no)} · ${esc(r.subject || r.lesson)}</strong><br>${[r.start && [r.start,r.end].filter(Boolean).join('–'),r.teacher,r.room].filter(Boolean).map(esc).join(' · ')}</p>`).join('')}</details>`).join('')}</details>`).join('') || '<p class="nb-empty">Здесь появятся сохранённые расписания.</p>'}
       </section>`;
   }
   function form(type) {
@@ -215,14 +219,18 @@ window.Notebook = (() => {
   let sending = false;
   async function exportDay(button) {
     const day = app().getExport();
-    if (!day?.rows?.length || sending) return;
+    if (sending) return;
     sending = true;
     button.disabled = true;
     try {
-      await app().api({ date: day.date, group: day.group }, undefined, true);
-      app().notify('Файл расписания отправлен в чат со Степашей.');
+      const archive = await app().api({ group: day?.group || '' }, undefined, true);
+      if (!Object.keys(archive.days).length) return app().notify('Для группы пока нет расписания.');
+      const others = records('archives').filter(a => a.group !== archive.group || a.college !== archive.college || a.branch !== archive.branch);
+      persist('archives', [...others, archive]);
+      if (button.isConnected) render();
+      app().notify('Все доступные даты сохранены в блокноте.');
     } catch (error) {
-      app().notify(error.message || 'Не удалось отправить файл.');
+      app().notify(error.message || 'Не удалось сохранить расписание.');
     } finally {
       button.disabled = false;
       sending = false;

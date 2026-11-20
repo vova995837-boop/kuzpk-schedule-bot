@@ -193,7 +193,7 @@ window.Agenda = (() => {
         return fetchData();
       }
       mount.querySelector('.ag-top').innerHTML = titleBlock();
-      if (active === 'day' && period === 'schedule') ui().saveExport({date, rows: payload.rows || [], group: payload.group});
+      if (active === 'day') ui().saveExport({date, rows: payload.rows || [], group: payload.group});
       paintResults();
     } catch (error) {
       if (pending.signal.aborted) return;
