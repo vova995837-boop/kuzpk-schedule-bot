@@ -96,7 +96,7 @@ window.Notebook = (() => {
       ${menuItem('grades', 'Оценки', 'grid', average())}
       ${menuItem('events', 'События', 'calendar', records('events').length || '')}
       <button type="button" class="nb-menu-item" data-nb-export>
-        ${icon('download')}<span><strong>Сохранить расписание в блокнот</strong><small>${esc(snapshot?.group || 'Основная группа')} · Все доступные даты</small></span></button>
+        ${icon('download')}<span><strong>Добавить расписание в календарь</strong><small>${esc(snapshot?.group || 'Основная группа')} · Все доступные даты</small></span></button>
       </section><section class="nb-block"><h2>Расписания групп</h2>
       ${records('archives').map(a => `<details><summary>${esc(a.group)} · ${esc(a.college)} · дней: ${Object.keys(a.days).length}</summary>
         ${Object.entries(a.days).map(([d, rows]) => `<details><summary>${esc(dayLabel(d))} · ${esc(d.slice(0,4))}</summary>
@@ -223,12 +223,25 @@ window.Notebook = (() => {
     sending = true;
     button.disabled = true;
     try {
-      const archive = await app().api({ group: day?.group || '' }, undefined, true);
-      if (!Object.keys(archive.days).length) return app().notify('Для группы пока нет расписания.');
-      const others = records('archives').filter(a => a.group !== archive.group || a.college !== archive.college || a.branch !== archive.branch);
-      persist('archives', [...others, archive]);
-      if (button.isConnected) render();
-      app().notify('Все доступные даты сохранены в блокноте.');
+      const result = await app().api({ group: day?.group || '' }, undefined, true);
+      if (!button.isConnected) return;
+      const url = new URL(result.path, location.origin);
+      const link = document.createElement('a');
+      link.href = url.href;
+      link.className = 'nb-menu-item';
+      link.textContent = 'Открыть календарь и добавить занятия';
+      link.target = '_blank';
+      link.rel = 'noopener';
+      link.onclick = event => {
+        if (window.Telegram?.WebApp?.openLink) {
+          event.preventDefault();
+          window.Telegram.WebApp.openLink(url.href);
+        }
+        link.remove();
+      };
+      button.nextElementSibling?.matches('a.nb-menu-item') && button.nextElementSibling.remove();
+      button.after(link);
+      link.focus();
     } catch (error) {
       app().notify(error.message || 'Не удалось сохранить расписание.');
     } finally {

@@ -2226,6 +2226,21 @@ async def background_tasks():
         await asyncio.sleep(20)
 
 
+from secrets import token_urlsafe
+from time import monotonic
+from schedule_calendar import group_calendar
+
+_calendar_downloads = {}
+
+
+async def calendar_download(request):
+    item = _calendar_downloads.get(request.match_info["key"])
+    if not item or item[0] <= monotonic():
+        raise web.HTTPGone(text="Ссылка истекла. Открой календарь ещё раз в Степаше.")
+    return web.Response(body=item[1], content_type="text/calendar", charset="utf-8",
+                        headers={"Cache-Control": "private, no-store"})
+
+
 async def miniapp_data(request):
     """Serve the signed-in Telegram user’s timetable and requested exports."""
     from aiogram.utils.web_app import safe_parse_webapp_init_data
@@ -2255,8 +2270,17 @@ async def miniapp_data(request):
             return web.json_response({"error": "Выбери группу для выгрузки"}, status=409)
         from sheets import group_schedule_days
         days = await group_schedule_days(group, college, branch)
-        return web.json_response({"college": college, "branch": branch, "group": group,
-                                  "days": {d.isoformat(): rows for d, rows in days.items() if rows}})
+        if not any(days.values()):
+            return web.json_response({"error": "Для этой группы пока нет занятий"}, status=409)
+        now = monotonic()
+        for key in list(_calendar_downloads):
+            if _calendar_downloads[key][0] <= now:
+                del _calendar_downloads[key]
+        if len(_calendar_downloads) >= 128:
+            del _calendar_downloads[next(iter(_calendar_downloads))]
+        key = token_urlsafe(24)
+        _calendar_downloads[key] = (now + 900, group_calendar(days, group))
+        return web.json_response({"path": f"/calendar/{key}.ics"})
     if section == "week":
         selected = request.query.get("group", "").strip() or user.get("group_name")
         if not selected:
@@ -2304,6 +2328,7 @@ async def miniapp_data(request):
 async def start_miniapp_server():
     app = web.Application()
     app.router.add_get("/api/miniapp", miniapp_data)
+    app.router.add_get("/calendar/{key}.ics", calendar_download)
     app.router.add_post("/api/miniapp/export", miniapp_data)
     async def miniapp_index(_request):
         return web.FileResponse(os.path.join(os.path.dirname(__file__), "miniapp", "index.html"))
