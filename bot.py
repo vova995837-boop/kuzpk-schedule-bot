@@ -12,6 +12,7 @@ from aiogram.fsm.state import StatesGroup, State
 from aiogram.fsm.context import FSMContext
 from aiogram.client.default import DefaultBotProperties
 from dotenv import load_dotenv
+from aiohttp import web
 
 from db import init_db, add_user, get_user, set_group, set_college, set_college_branch, set_role, list_groups, users_for_group, all_users, save_announcement, recent_announcements, save_schedule_update, save_bells_update, schedule_override_groups, get_user_settings, update_user_setting, toggle_sport_subscription, get_sport_subscriptions, users_for_sport, users_for_group_preference, users_with_preference, claim_notification, get_auto_schedule_snapshots, save_auto_schedule_snapshots
 from sheets import get_schedule, get_week_schedule, get_teachers, get_rooms, get_bells, get_entity_names, get_entity_schedule, room_building
@@ -106,6 +107,10 @@ def main_menu(role="student", group_name=None, college_id="kuzpk", hidden_menu=(
         rows.append([InlineKeyboardButton(text="🎓 Моя группа", callback_data="menu|group")])
     if "notifications" not in hidden:
         rows.append([InlineKeyboardButton(text="🔔 Уведомления", callback_data="settings|notifications")])
+    webapp_url = os.getenv("WEBAPP_URL", "").strip().rstrip("/")
+    if webapp_url.startswith("https://"):
+        from aiogram.types import WebAppInfo
+        rows.insert(0, [InlineKeyboardButton(text="✨ Открыть приложение", web_app=WebAppInfo(url=webapp_url))])
     if is_courses_group(group_name) and college_id == "kuzpk":
         if "courses" not in hidden: rows.append([InlineKeyboardButton(text="📚 Курсы", callback_data="menu|courses")])
         if "education" not in hidden: rows.append([InlineKeyboardButton(text="🎓 Образование", callback_data="menu|education")])
@@ -2220,14 +2225,74 @@ async def background_tasks():
             logging.exception("Ошибка фоновой отправки напоминаний.")
         await asyncio.sleep(20)
 
+
+async def miniapp_data(request):
+    """Read-only schedule API for Telegram Mini App; accepts only Telegram initData identity."""
+    from aiogram.utils.web_app import safe_parse_webapp_init_data
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    if not init_data:
+        return web.json_response({"error": "Открой приложение из Telegram"}, status=401)
+    try:
+        parsed = safe_parse_webapp_init_data(TOKEN, init_data)
+        uid = int(parsed.user.id)
+    except Exception:
+        return web.json_response({"error": "Не удалось проверить Telegram"}, status=401)
+    user = await get_user(uid)
+    if not user or not user.get("college_selected"):
+        return web.json_response({"error": "Сначала выбери колледж и группу в боте"}, status=409)
+    college = user.get("college_id") or "kuzpk"
+    branch = user.get("college_branch")
+    today = datetime.now(TZ).date()
+    section = request.query.get("section", "schedule")
+    day_raw = request.query.get("date", today.isoformat())
+    try:
+        day = date.fromisoformat(day_raw)
+    except ValueError:
+        return web.json_response({"error": "Неверная дата"}, status=400)
+    if section == "teachers" or section == "rooms":
+        kind = "teacher" if section == "teachers" else "room"
+        query = request.query.get("q", "").strip().casefold()
+        names = await get_entity_names(kind, college, branch)
+        items = [name for name in names if query in name.casefold()][:100]
+        selected = request.query.get("name", "")
+        rows = await get_entity_schedule(kind, selected, day, college, branch) if selected in names else []
+    else:
+        selected = request.query.get("group", "").strip() or user.get("group_name")
+        if not selected:
+            return web.json_response({"error": "Выбери основную группу в боте"}, status=409)
+        rows = await get_schedule(selected, day, college, branch)
+        items = await list_groups(college)
+        q = request.query.get("q", "").strip().casefold()
+        if q:
+            items = [name for name in items if q in name.casefold()][:100]
+    rows.sort(key=lambda item: (int(item.get("lesson_no") or 0) if str(item.get("lesson_no") or "").isdigit() else 999,
+                                str(item.get("start") or "")))
+    return web.json_response({"section": section, "college": college, "group": selected if section == "schedule" else user.get("group_name"),
+                              "date": day.isoformat(), "items": items, "rows": rows})
+
+
+async def start_miniapp_server():
+    app = web.Application()
+    app.router.add_get("/api/miniapp", miniapp_data)
+    app.router.add_static("/", path=os.path.join(os.path.dirname(__file__), "miniapp"), show_index=False)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", "8080"))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logging.info("Mini App server started on port %s", port)
+    return runner
+
 async def main():
     await init_db()
     if ADMIN_ID:
         await add_user(ADMIN_ID, "Администратор", "admin")
     task = asyncio.create_task(background_tasks())
+    web_runner = await start_miniapp_server()
     try:
         await dp.start_polling(bot)
     finally:
+        await web_runner.cleanup()
         task.cancel()
         try:
             await task
