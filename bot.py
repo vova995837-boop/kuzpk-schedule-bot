@@ -97,6 +97,8 @@ def is_courses_group(group_name):
     return "-" in normalized and len(normalized) >= 5
 
 def main_menu(role="student", group_name=None, college_id="kuzpk", hidden_menu=()):
+    if college_id == "kemtip":
+        return kemtip_keyboard()
     hidden = set(hidden_menu or ())
     rows = []
     if "schedule" not in hidden:
@@ -125,6 +127,8 @@ def back_button(destination="home"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"menu|{destination}")]])
 
 def schedule_menu_keyboard(college_id="kuzpk", hidden_menu=()):
+    if college_id == "kemtip":
+        return kemtip_keyboard()
     hidden = set(hidden_menu or ())
     rows = [
         [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")] if "schedule" not in hidden else [],
@@ -141,9 +145,23 @@ def schedule_menu_keyboard(college_id="kuzpk", hidden_menu=()):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-COLLEGES = {"kuzpk": "КузПК", "kuztagis": "КузТАГиС", "pgt": "ПГТ им. В. П. Романова", "yamk": "ЯМК"}
-COLLEGE_CITIES = {"kuzpk": "Кемерово", "kuztagis": "Кемерово", "pgt": "Прокопьевск", "yamk": "Салехард"}
-COLLEGE_REGIONS = {"kuzpk": "kuzbass", "kuztagis": "kuzbass", "pgt": "kuzbass", "yamk": "yanao"}
+COLLEGES = {"kemtip": "КемТИПиСУ", "kuzpk": "КузПК", "kuztagis": "КузТАГиС", "pgt": "ПГТ им. В. П. Романова", "yamk": "ЯМК"}
+COLLEGE_CITIES = {"kemtip": "Кемерово", "kuzpk": "Кемерово", "kuztagis": "Кемерово", "pgt": "Прокопьевск", "yamk": "Салехард"}
+COLLEGE_REGIONS = {"kemtip": "kuzbass", "kuzpk": "kuzbass", "kuztagis": "kuzbass", "pgt": "kuzbass", "yamk": "yanao"}
+
+KEMTIP_SCHEDULES = {
+    "Расписание занятий": "https://cloud.42tip.ru/index.php/s/yJbscbdKBWPCPGN",
+    "Расписание экзаменов": "https://cloud.42tip.ru/index.php/s/rS82twwmtdSJknj",
+    "Расписание звонков": "https://cloud.42tip.ru/index.php/s/Ysno5JbRGGm945p",
+    "Сайт колледжа": "https://42tip.kemobl.ru/studentam/raspisanie/",
+}
+
+
+def kemtip_keyboard():
+    rows = [[InlineKeyboardButton(text=label, url=url)] for label, url in KEMTIP_SCHEDULES.items()]
+    rows.append([InlineKeyboardButton(text="↩️ Выбрать колледж", callback_data="menu|college")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def college_label(college_id):
     return f"{COLLEGES.get(college_id, 'КузПК')} · {COLLEGE_CITIES.get(college_id, 'Кемерово')}"
@@ -151,6 +169,7 @@ def college_label(college_id):
 def college_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🎓 КузПК · Кемерово", callback_data="college|kuzpk")],
+        [InlineKeyboardButton(text="КемТИПиСУ · Кемерово", callback_data="college|kemtip")],
         [InlineKeyboardButton(text="🏫 КузТАГиС · Кемерово", callback_data="college|kuztagis")],
         [InlineKeyboardButton(text="🏢 ПГТ им. В. П. Романова · Прокопьевск", callback_data="college|pgt")],
         [InlineKeyboardButton(text="🏫 ЯМК · Салехард", callback_data="college|yamk")],
@@ -1323,6 +1342,9 @@ async def start(m: Message, state: FSMContext):
     role = "admin" if m.from_user.id == ADMIN_ID else (user["role"] if user else "student")
     await add_user(m.from_user.id, m.from_user.full_name, role)
     user = await get_user(m.from_user.id)
+    if user.get("college_id") == "kemtip" and user.get("college_selected"):
+        await m.answer("КемТИПиСУ · Кемерово. Выбери расписание:", reply_markup=kemtip_keyboard())
+        return
     if user.get("college_id") == "yamk" and user.get("college_selected"):
         await remove_old_keyboard(m)
         await m.answer("🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение или преподавателя:", reply_markup=yamk_menu_keyboard())
@@ -1378,6 +1400,9 @@ async def choose_college(c: CallbackQuery):
     await add_user(c.from_user.id, c.from_user.full_name, role)
     await set_college(c.from_user.id, college_id)
     await c.answer()
+    if college_id == "kemtip":
+        await safe_edit(c.message, "КемТИПиСУ · Кемерово. Выбери расписание:", reply_markup=kemtip_keyboard())
+        return
     if college_id == "yamk":
         await safe_edit(c.message, "🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение или преподавателя:", reply_markup=yamk_menu_keyboard())
         return
@@ -2256,6 +2281,10 @@ async def miniapp_data(request):
     if not user or not user.get("college_selected"):
         return web.json_response({"error": "Сначала выбери колледж и группу в боте"}, status=409)
     college = user.get("college_id") or "kuzpk"
+    if college == "kemtip":
+        if request.method == "POST":
+            return web.json_response({"error": "Колледж публикует занятия сканами. Экспорт в календарь пока недоступен."}, status=409)
+        return web.json_response({"college": college, "documents": KEMTIP_SCHEDULES})
     branch = user.get("college_branch")
     today = datetime.now(TZ).date()
     section = request.query.get("section", "schedule")

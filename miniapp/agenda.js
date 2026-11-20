@@ -184,6 +184,13 @@ window.Agenda = (() => {
       response = payload;
       college = payload.college;
       ui().setCollege(college);
+      if (payload.documents) {
+        response = null;
+        ui().saveExport(null);
+        slot.innerHTML = '<h2>Расписания колледжа</h2>' + Object.entries(payload.documents)
+          .map(([label, url]) => `<a class="nb-menu-item" target="_blank" rel="noopener" href="${ui().esc(url)}">${ui().esc(label)}</a>`).join('');
+        return;
+      }
       if (payload.group && !pickedGroup && (active === 'day' || kind === 'teachers')) homeGroup = payload.group;
       groups = payload.groups || (active === 'day' ? payload.items : null) || groups;
       const localDate = campusClock().date;

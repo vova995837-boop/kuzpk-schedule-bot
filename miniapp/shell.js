@@ -3,7 +3,7 @@
 
   const view = document.querySelector('#screen');
   const routes = { day: 'Расписание', search: 'Поиск', notebook: 'Блокнот' };
-  const colleges = { kuzpk: 'КузПК', kuztagis: 'КузТАГиС', pgt: 'ПГТ', yamk: 'ЯМК' };
+  const colleges = { kemtip: 'КемТИПиСУ', kuzpk: 'КузПК', kuztagis: 'КузТАГиС', pgt: 'ПГТ', yamk: 'ЯМК' };
   const paths = {
     calendar: 'M4 6h16v15H4z M8 3v5m8-5v5M4 11h16m-12 4h3',
     search: 'M16.7 10.5a6.2 6.2 0 1 1-12.4 0 6.2 6.2 0 0 1 12.4 0z M15.1 15.1l5.1 5.1',
