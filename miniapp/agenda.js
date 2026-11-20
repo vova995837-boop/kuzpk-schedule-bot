@@ -28,10 +28,11 @@ window.Agenda = (() => {
   let active = '', period = 'schedule', kind = 'teachers', entity = '', query = '';
   let pickedGroup = '', homeGroup = '', groups = [], college = '';
   let date = iso(new Date()), followToday = true, response = null;
+  let campusZone;
   let request, ticker, typing, mount;
 
   function campusClock() {
-    const zone = college === 'yamk' ? 'Asia/Yekaterinburg' : college ? 'Asia/Novokuznetsk' : undefined;
+    const zone = campusZone;
     const parts = new Intl.DateTimeFormat('en-CA', {
       timeZone: zone, year:'numeric', month:'2-digit', day:'2-digit',
       hour:'2-digit', minute:'2-digit', hourCycle:'h23'
@@ -46,18 +47,19 @@ window.Agenda = (() => {
     return '<button type="button" data-action="' + id + '" aria-pressed="' + isSelected + '">' + text + '</button>';
   }
   function groupPicker() {
-    const selected = pickedGroup || homeGroup;
+    const defaultName = active === 'search' ? 'Все группы' : (homeGroup || 'Моя группа');
+    const selected = pickedGroup || defaultName;
     const names = [...new Set([homeGroup, pickedGroup, ...groups].filter(Boolean))];
-    const opts = names.filter(name => name !== homeGroup || name === pickedGroup).map(name =>
+    const opts = names.filter(name => active === 'search' || name !== homeGroup || name === pickedGroup).map(name =>
       '<option value="' + esc(name) + '"' + (pickedGroup === name ? ' selected' : '') + '>' + esc(name) + '</option>').join('');
     return '<label class="ag-group">' + icon('grid') + '<span>' + esc(selected || 'Моя группа') + '</span>' + icon('chevron') +
-      '<select aria-label="Группа для просмотра" data-group><option value="">' + esc(homeGroup || 'Моя группа') + '</option>' + opts + '</select></label>';
+      '<select aria-label="Группа для просмотра" data-group><option value="">' + esc(defaultName) + '</option>' + opts + '</select></label>';
   }
   function titleBlock() {
     const schedule = active === 'day';
     const title = schedule ? 'Расписание' : 'Поиск';
     return '<header class="ag-heading"><h1>' + title + '</h1><div class="ag-heading-tools">' +
-      ((schedule || kind === 'teachers') && groups.length ? groupPicker() : '') +
+      (schedule && groups.length ? groupPicker() : '') +
       action('refresh', 'Обновить', 'refresh') + '</div></header>';
   }
   function strip() {
@@ -166,8 +168,11 @@ window.Agenda = (() => {
       const rows = response.rows || [];
       slot.innerHTML = (active === 'day' ? '<div data-ag-ticket>' + brief(rows) + '</div>' : '') + dayContent(rows, date);
     }
+    if (response.nearest) {
+      slot.insertAdjacentHTML('afterbegin', '<button type="button" class="ag-retry" data-date="' + esc(response.nearest) + '">Открыть занятия за ' + esc(fmt(response.nearest, {day:'numeric', month:'long'})) + '</button>');
+    }
   }
-  async function fetchData() {
+  async function fetchData(nearest = false) {
     request?.abort();
     const pending = request = new AbortController();
     const slot = mount.querySelector('.ag-results');
@@ -175,23 +180,22 @@ window.Agenda = (() => {
     slot.setAttribute('aria-busy', 'true');
     slot.innerHTML = '<div class="ag-load" role="status">Загрузка…</div>';
     const params = { section: active === 'day' ? period : kind, date };
-    if (pickedGroup && (active === 'day' || kind === 'teachers')) params.group = pickedGroup;
-    if (active === 'search' && entity) params.name = entity;
+    if (pickedGroup && active === 'day') params.group = pickedGroup;
+    if (active === 'search' && entity) { params.name = entity; if (nearest) params.nearest = '1'; }
     if (active === 'search' && query.trim()) params.q = query.trim();
     try {
       const payload = await ui().api(params, pending.signal);
       if (pending.signal.aborted) return;
       response = payload;
+      if (college && payload.college !== college && pickedGroup) {
+        pickedGroup = ''; homeGroup = ''; groups = []; college = payload.college;
+        return fetchData();
+      }
+      campusZone = payload.timezone || campusZone;
       college = payload.college;
       ui().setCollege(college);
-      if (payload.documents) {
-        response = null;
-        ui().saveExport(null);
-        slot.innerHTML = '<h2>Расписания колледжа</h2>' + Object.entries(payload.documents)
-          .map(([label, url]) => `<a class="nb-menu-item" target="_blank" rel="noopener" href="${ui().esc(url)}">${ui().esc(label)}</a>`).join('');
-        return;
-      }
-      if (payload.group && !pickedGroup && (active === 'day' || kind === 'teachers')) homeGroup = payload.group;
+      if (!pickedGroup && active === 'day') homeGroup = payload.group || '';
+      if (nearest && entity && payload.date && payload.date !== date) { date = payload.date; followToday = false; paintChrome(); }
       groups = payload.groups || (active === 'day' ? payload.items : null) || groups;
       const localDate = campusClock().date;
       if (followToday && date !== localDate) {
@@ -231,7 +235,7 @@ window.Agenda = (() => {
       return;
     }
     if (button.dataset.entity !== undefined) {
-      entity = button.dataset.entity; paintChrome(); fetchData(); mount.scrollIntoView({block:'start'}); return;
+      entity = button.dataset.entity; paintChrome(); fetchData(true); mount.scrollIntoView({block:'start'}); return;
     }
     if (button.dataset.date) {
       if (active === 'day') period = 'schedule';

@@ -67,11 +67,16 @@ def catalogue(data):
     return groups
 
 
-@lru_cache(maxsize=32)
-def lessons(data, group, weekday):
-    index,c,days=catalogue(data)[group]
+@lru_cache(maxsize=1)
+def _page_grid(data, index):
     with _lock, pdfplumber.open(io.BytesIO(data)) as pdf:
-        gray,ink,cols,_=grid(pdf.pages[index])
+        return grid(pdf.pages[index])
+
+
+@lru_cache(maxsize=32)
+def lesson_cells(data, group, weekday):
+    index,c,days=catalogue(data)[group]
+    gray,ink,cols,_=_page_grid(data, index)
     x,right,end=cols[c]
     top,bottom=days[weekday]
     crop=gray[top:bottom+1,x:end+1].copy()
@@ -81,6 +86,9 @@ def lessons(data, group, weekday):
         crop[cv2.dilate(mask,np.ones((3,3),np.uint8))>0]=255
     tokens=words(crop)
     cuts=[0]+[v for v in runs(ink[top:bottom,x+8:right-8].mean(axis=1)>.75) if 8<v<bottom-top-8]+[bottom-top]
+    number_edge = cols[0][0]
+    slot_width = max(10, int(gray.shape[1] * .015))
+    slot_edges = runs(ink[top:bottom, number_edge-slot_width:number_edge-5].mean(axis=1)>.8)
     result=[]
     for a,b in zip(cuts,cuts[1:]):
         entries=[r for r in tokens if a<=int(r["top"])+int(r["height"])/2<b]
@@ -93,7 +101,10 @@ def lessons(data, group, weekday):
                 lines.setdefault((r["block_num"],r["par_num"],r["line_num"]),[]).append(r["text"])
         labels=[" ".join(v).strip(" |") for v in lines.values()]
         if not labels: continue
-        result.append((" · ".join(filter(None,labels)), ", ".join(dict.fromkeys(rooms))))
+        prior = sum(6 < edge <= a+6 for edge in slot_edges)
+        # Monday includes two zero-period rows before lesson one.
+        number = max(0, (prior + (0 if weekday == 0 else 2)) // 2)
+        result.append((str(number), " · ".join(filter(None,labels)), ", ".join(dict.fromkeys(rooms))))
     return result
 
 @lru_cache(maxsize=2)
@@ -106,3 +117,57 @@ def week_start(data):
         start, end = (datetime.strptime(d, "%d.%m.%Y").date() for d in period.groups())
         if start.weekday() == 0 and end == start + timedelta(days=5):
             return start
+
+
+def lessons(data, group, weekday):
+    return [(label, room) for _, label, room in lesson_cells(data, group, weekday)]
+
+
+def timetable(data):
+    monday = week_start(data)
+    if not monday:
+        raise ValueError("Missing timetable week")
+    rows = []
+    for group in catalogue(data):
+        for weekday in range(6):
+            for number, label, room in lesson_cells(data, group, weekday):
+                subject, sep, teacher = label.rpartition(" · ")
+                if not sep or not re.search(r"[А-ЯЁ]\.\s*[А-ЯЁ]\.", teacher):
+                    subject, teacher = label, ""
+                rows.append(dict(group=group, date=(monday+timedelta(days=weekday)).isoformat(),
+                                 lesson_no=number, subject=subject, teacher=teacher, room=room))
+    if not rows:
+        raise ValueError("Empty timetable")
+    return rows
+
+
+def add_times(rows, data, bell_docs):
+    """Attach only explicit times or times from a recognized theory shift."""
+    from kemtip import read_page
+    slots = {}
+    for title, document in bell_docs:
+        if "теори" not in title.lower():
+            continue
+        text, _ = read_page(document, 0)
+        shift = None
+        for line in text.splitlines():
+            heading = re.search(r"([12])\s*смена", line.lower())
+            if heading:
+                shift = heading[1]
+            match = re.search(r"(\d+)\s*,\s*\d+\s*урок\s+(\d{1,2})[.:](\d{2})\s*[-–]\s*(\d{1,2})[.:](\d{2})", line)
+            if shift and match:
+                slot, h, m, eh, em = match.groups()
+                slots[shift, str((int(slot)+1)//2)] = (f"{int(h):02d}:{m}", f"{int(eh):02d}:{em}")
+    groups = catalogue(data)
+    shifts = {}
+    for group, (page, _, _) in groups.items():
+        if page not in shifts:
+            gray, _, _, _ = _page_grid(data, page)
+            text = " ".join(r["text"] for r in words(gray[:int(gray.shape[0]*.15)]))
+            found = re.search(r"\b([12])\s*смена", text, re.I)
+            shifts[page] = found[1] if found else ""
+    for row in rows:
+        explicit = re.search(r"\b(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})\b", row["subject"])
+        period = explicit.groups() if explicit else slots.get((shifts[groups[row["group"]][0]],row["lesson_no"]))
+        if period and (explicit or "практик" not in row["subject"].lower()):
+            row["start"], row["end"] = period

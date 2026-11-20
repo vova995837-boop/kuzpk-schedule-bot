@@ -236,14 +236,21 @@ async def _values(tab):
     except Exception:
         return []
 
+async def _college_rows(college_id):
+    if college_id == "kemtip":
+        from kemtip import get_rows
+    else:
+        from kuztagis import get_rows
+    return await asyncio.to_thread(get_rows)
+
+
 async def get_groups(college_id="kuzpk"):
     imported = await schedule_override_groups(college_id)
     if college_id == "pgt":
         from pgt import get_groups as pgt_groups
         return sorted(set(await pgt_groups()) | set(imported))
-    if college_id == "kuztagis":
-        from kuztagis import get_rows
-        rows = await asyncio.to_thread(get_rows)
+    if college_id in ("kuztagis", "kemtip"):
+        rows = await _college_rows(college_id)
         return sorted({r["group"] for r in rows if r.get("group")} | set(imported))
     if college_id == "yamk":
         from yamk import get_groups as yamk_groups
@@ -336,9 +343,8 @@ async def get_schedule(group, day: date, college_id="kuzpk", college_branch=None
         from pgt import get_group_rows
         rows = await get_group_rows(group)
         return await _with_bell_times([r for r in rows if r.get("date") == day.isoformat()], day, college_id)
-    if college_id == "kuztagis":
-        from kuztagis import get_rows
-        rows = await asyncio.to_thread(get_rows)
+    if college_id in ("kuztagis", "kemtip"):
+        rows = await _college_rows(college_id)
         return await _with_bell_times(_collapse_lessons([r for r in rows if r.get("date") == day.isoformat() and r.get("group") == group]), day, college_id)
     if college_id == "yamk":
         from yamk import get_group_schedule
@@ -381,9 +387,8 @@ async def group_schedule_days(group, college_id, college_branch, days=None):
     elif college_id == "yamk":
         from yamk import get_group_schedule
         rows = await asyncio.to_thread(get_group_schedule, group, college_branch or "otp")
-    elif college_id == "kuztagis":
-        from kuztagis import get_rows
-        rows = await asyncio.to_thread(get_rows)
+    elif college_id in ("kuztagis", "kemtip"):
+        rows = await _college_rows(college_id)
     else:
         rows = _new_schedule_rows() or await _values("Расписание")
         if not rows:
@@ -413,9 +418,8 @@ async def get_teachers(college_id="kuzpk", college_branch=None):
     if college_id == "pgt":
         from pgt import get_entity_names
         return [{"teacher": name} for name in await get_entity_names("teacher")]
-    if college_id == "kuztagis":
-        from kuztagis import get_rows
-        rows = await asyncio.to_thread(get_rows)
+    if college_id in ("kuztagis", "kemtip"):
+        rows = await _college_rows(college_id)
         return [{"teacher": r["teacher"], "subject": r["subject"], "groups": r["group"]}
                 for r in rows if r.get("teacher")]
     if college_id == "yamk":
@@ -435,9 +439,8 @@ async def get_rooms(college_id="kuzpk", college_branch=None):
     if college_id == "pgt":
         from pgt import get_entity_names
         return [{"room": name} for name in await get_entity_names("room")]
-    if college_id == "kuztagis":
-        from kuztagis import get_rows
-        rows = await asyncio.to_thread(get_rows)
+    if college_id in ("kuztagis", "kemtip"):
+        rows = await _college_rows(college_id)
         return [{"room": room} for room in {r.get("room") for r in rows if r.get("room")}]
     if college_id == "yamk":
         from yamk import get_entity_rows
@@ -458,7 +461,7 @@ async def get_bells(college_id="kuzpk"):
             return override
     except Exception as exc:
         logging.warning("Не удалось загрузить сохранённое расписание звонков: %s", exc)
-    if college_id == "pgt":
+    if college_id in ("pgt", "kemtip"):
         return []
     if college_id == "kuztagis":
         from kuztagis import get_bells as kuztagis_bells
@@ -540,12 +543,11 @@ async def get_entity_schedule(kind, value, day: date | None, college_id="kuzpk",
         from pgt import get_entity_rows
         rows = await get_entity_rows(kind, value)
         return rows if day is None else [r for r in rows if r.get("date") == day.isoformat()]
-    if college_id == "kuztagis":
-        from kuztagis import get_rows
-        all_rows = await asyncio.to_thread(get_rows)
+    if college_id in ("kuztagis", "kemtip"):
+        all_rows = await _college_rows(college_id)
         new_rows = [r for r in all_rows if day is None or r.get("date") == day.isoformat()]
         key = "teacher" if kind == "teacher" else "room"
-        result = [{k: r.get(k) for k in ("date", "lesson_no", "lesson", "subject", "teacher", "room", "group")}
+        result = [{k: r.get(k) for k in ("date", "lesson_no", "lesson", "subject", "teacher", "room", "group", "start", "end")}
                   for r in new_rows if str(r.get(key, "")).strip() == value]
         return _collapse_lessons(result)
     if college_id == "yamk":

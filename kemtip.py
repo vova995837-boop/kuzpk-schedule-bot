@@ -59,3 +59,46 @@ def read_page(data, index):
             content = proc.stdout.decode()
         lines = [line.strip() for line in content.splitlines() if line.strip()]
         return "\n".join(lines), len(pdf.pages)
+
+
+# Keep the verified timetable available while a newly published scan is being read.
+_snapshot = None
+_refresh_after = 0
+_snapshot_lock = Lock()
+
+
+def _refresh_snapshot():
+    global _snapshot, _refresh_after
+    import hashlib
+    import logging
+    try:
+        from kemtip_grid import timetable, add_times
+        data = documents("classes")[0][1]
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != _snapshot["digest"]:
+            replacement = timetable(data)
+            try:
+                add_times(replacement, data, documents("bells"))
+            except Exception:
+                logging.exception("Could not match KемТИПиСУ bell times")
+            with _snapshot_lock:
+                _snapshot = {"digest": digest, "rows": replacement}
+    except Exception:
+        logging.exception("Could not refresh KемТИПиСУ timetable")
+    finally:
+        with _snapshot_lock:
+            _refresh_after = time.monotonic() + 600
+
+
+def get_rows():
+    global _snapshot, _refresh_after
+    import json
+    from pathlib import Path
+    from threading import Thread
+    with _snapshot_lock:
+        if _snapshot is None:
+            _snapshot = json.loads(Path(__file__).with_name("kemtip_week.json").read_bytes())
+        if time.monotonic() >= _refresh_after:
+            _refresh_after = float("inf")
+            Thread(target=_refresh_snapshot, daemon=True).start()
+        return _snapshot["rows"]

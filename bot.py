@@ -97,8 +97,6 @@ def is_courses_group(group_name):
     return "-" in normalized and len(normalized) >= 5
 
 def main_menu(role="student", group_name=None, college_id="kuzpk", hidden_menu=()):
-    if college_id == "kemtip":
-        return kemtip_keyboard()
     hidden = set(hidden_menu or ())
     rows = []
     if "schedule" not in hidden:
@@ -127,8 +125,6 @@ def back_button(destination="home"):
     return InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text=label, callback_data=f"menu|{destination}")]])
 
 def schedule_menu_keyboard(college_id="kuzpk", hidden_menu=()):
-    if college_id == "kemtip":
-        return kemtip_keyboard()
     hidden = set(hidden_menu or ())
     rows = [
         [InlineKeyboardButton(text="📅 Моё расписание", callback_data="menu|today")] if "schedule" not in hidden else [],
@@ -139,6 +135,9 @@ def schedule_menu_keyboard(college_id="kuzpk", hidden_menu=()):
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu|home")],
     ]
     rows = [row for row in rows if row]
+    if college_id == "kemtip":
+        rows = [[kemtip_button("🔔 Звонки", "bells") if b.callback_data == "menu|bells" else b for b in row] for row in rows]
+        rows.insert(-1, [kemtip_button("🎓 Экзамены", "exams"), kemtip_button("Исходные страницы", "classes|0|0|0")])
     if college_id == "kuzpk":
         if "education" not in hidden: rows.insert(-1, [InlineKeyboardButton(text="📚 Образование и документы", callback_data="menu|education_schedule")])
         if "sports" not in hidden: rows.insert(-1, [InlineKeyboardButton(text="🏅 Спортивные секции", callback_data="menu|sports")])
@@ -373,7 +372,7 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
             await c.answer()
             return
         kb = await group_keyboard(college_id=college_id)
-        await safe_edit(c.message, "🎓 <b>Выбор учебной группы</b>\nСначала выбери специальность:", reply_markup=kb or back_button())
+        await safe_edit(c.message, "🎓 <b>Выбор учебной группы</b>\nВыбери свою группу:", reply_markup=kb or back_button())
     elif action == "browse_group":
         user = await get_user(c.from_user.id)
         college_id = (user or {}).get("college_id", "kuzpk")
@@ -381,7 +380,7 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
             await safe_edit(c.message, "🏫 <b>ЯМК</b>\nДля просмотра расписания выбери отделение:", reply_markup=yamk_menu_keyboard())
         else:
             kb = await group_keyboard(college_id=college_id, view_mode=True)
-            await safe_edit(c.message, "👀 <b>Временный просмотр другой группы</b>\nВыбери специальность. Основная группа профиля не изменится:", reply_markup=kb or back_button("schedule"))
+            await safe_edit(c.message, "👀 <b>Временный просмотр другой группы</b>\nВыбери группу для просмотра:", reply_markup=kb or back_button("schedule"))
     elif action == "settings":
         await show_settings(c.message, c.from_user.id, "home")
     elif action == "notifications":
@@ -396,7 +395,7 @@ async def menu_action(c: CallbackQuery, state: FSMContext):
     elif action == "rooms":
         user = await get_user(c.from_user.id)
         college_id = (user or {}).get("college_id", "kuzpk")
-        if college_id in ("pgt", "kuztagis", "yamk"):
+        if college_id in ("pgt", "kuztagis", "kemtip", "yamk"):
             await show_entity_picker(c.message, "room", 0, edit=True, college_id=college_id, college_branch=(user or {}).get("college_branch"))
         else:
             await show_building_picker(c.message, edit=True, college_id=college_id)
@@ -763,20 +762,31 @@ async def entity_picker_page(c: CallbackQuery):
         await show_entity_picker(c.message, kind, int(raw_page), edit=True, college_id=(user or {}).get("college_id", "kuzpk"), college_branch=(user or {}).get("college_branch"))
     await c.answer()
 
+async def entity_day(kind, name, day, college_id, college_branch, nearest_if_empty):
+    rows = await get_entity_schedule(kind, name, day, college_id, college_branch)
+    if nearest_if_empty and not rows and college_id in ("pgt", "kuztagis", "kemtip", "yamk"):
+        available = await get_entity_schedule(kind, name, None, college_id, college_branch)
+        dates = set()
+        for row in available:
+            try:
+                dates.add(date.fromisoformat(str(row.get("date"))))
+            except ValueError:
+                continue
+        dates = sorted(dates)
+        if dates:
+            upcoming = [schedule_day for schedule_day in dates if schedule_day >= day]
+            day = upcoming[0] if upcoming else dates[-1]
+            rows = [row for row in available if row.get("date") == day.isoformat()]
+    return day, rows
+
+
 async def render_entity_schedule(target, kind: str, index: int, day: date, edit: bool = True, college_id="kuzpk", college_branch=None, nearest_if_empty=False):
     names = await get_entity_names(kind, college_id, college_branch)
     if index < 0 or index >= len(names):
         await safe_edit(target, "Список изменился. Выбери запись ещё раз.", reply_markup=back_button())
         return
     name = names[index]
-    rows = await get_entity_schedule(kind, name, day, college_id, college_branch)
-    if nearest_if_empty and not rows and college_id in ("pgt", "kuztagis"):
-        available = await get_entity_schedule(kind, name, None, college_id, college_branch)
-        dates = sorted({date.fromisoformat(str(row["date"])) for row in available if row.get("date")})
-        if dates:
-            upcoming = [schedule_day for schedule_day in dates if schedule_day >= day]
-            day = upcoming[0] if upcoming else dates[-1]
-            rows = [row for row in available if row.get("date") == day.isoformat()]
+    day, rows = await entity_day(kind, name, day, college_id, college_branch, nearest_if_empty)
     text = format_schedule(name, day, rows, entity_type=kind)
     picker_page = index // 8
     nav = [InlineKeyboardButton(text="‹ День", callback_data=f"entity|{kind}|{index}|{(day-timedelta(days=1)):%Y%m%d}"),
@@ -1350,6 +1360,12 @@ async def group_keyboard(prefix=None, page=0, college_id="kuzpk", view_mode=Fals
     groups = await list_groups(college_id)
     if not groups:
         return None
+    if college_id == "kemtip":
+        action = "groupview:" if view_mode else "group:"
+        buttons = [InlineKeyboardButton(text=g, callback_data=action + g) for g in groups]
+        rows = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+        rows.append([InlineKeyboardButton(text="↩️ Назад", callback_data="menu|schedule" if view_mode else "menu|college")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
     prefixes = sorted({str(g).split("-", 1)[0] for g in groups})
     if prefix is None:
         prefix_action = "specview" if view_mode else "spec"
@@ -1436,9 +1452,6 @@ async def start(m: Message, state: FSMContext):
     role = "admin" if m.from_user.id == ADMIN_ID else (user["role"] if user else "student")
     await add_user(m.from_user.id, m.from_user.full_name, role)
     user = await get_user(m.from_user.id)
-    if user.get("college_id") == "kemtip" and user.get("college_selected"):
-        await m.answer("КемТИПиСУ · Кемерово. Выбери расписание:", reply_markup=kemtip_keyboard())
-        return
     if user.get("college_id") == "yamk" and user.get("college_selected"):
         await remove_old_keyboard(m)
         await m.answer("🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение или преподавателя:", reply_markup=yamk_menu_keyboard())
@@ -1447,7 +1460,7 @@ async def start(m: Message, state: FSMContext):
         if user.get("college_selected"):
             markup = await group_keyboard(college_id=user.get("college_id", "kuzpk"))
             await remove_old_keyboard(m)
-            await m.answer(f"🎓 <b>{college_label(user.get('college_id', 'kuzpk'))}</b>\nВыбери специальность, затем свою группу:", reply_markup=markup or back_button())
+            await m.answer(f"🎓 <b>{college_label(user.get('college_id', 'kuzpk'))}</b>\nВыбери свою группу:", reply_markup=markup or back_button())
         else:
             await remove_old_keyboard(m)
             await m.answer("👋 Привет! Сначала выбери город:", reply_markup=city_keyboard())
@@ -1494,9 +1507,6 @@ async def choose_college(c: CallbackQuery):
     await add_user(c.from_user.id, c.from_user.full_name, role)
     await set_college(c.from_user.id, college_id)
     await c.answer()
-    if college_id == "kemtip":
-        await safe_edit(c.message, "КемТИПиСУ · Кемерово. Выбери расписание:", reply_markup=kemtip_keyboard())
-        return
     if college_id == "yamk":
         await safe_edit(c.message, "🏫 <b>ЯМК · Салехард</b>\n\nВыбери отделение или преподавателя:", reply_markup=yamk_menu_keyboard())
         return
@@ -1508,7 +1518,7 @@ async def choose_college(c: CallbackQuery):
         return
     markup = await group_keyboard(college_id=college_id)
     await safe_edit(c.message,
-        f"🏫 <b>{college_label(college_id)}</b>\n\nВыбери специальность, затем свою группу:",
+        f"🏫 <b>{college_label(college_id)}</b>\n\nВыбери свою группу:",
         reply_markup=markup)
 
 
@@ -1867,6 +1877,17 @@ def temporary_schedule_keyboard(group_name, day, mode):
          InlineKeyboardButton(text="🎓 Моя группа", callback_data=f"gsc|return|d|{datetime.now(TZ).date():%Y%m%d}|0")]])
 
 
+async def nearest_group_day(group, day, college, branch):
+    from sheets import group_schedule_days
+    try:
+        published = await group_schedule_days(group, college, branch)
+    except Exception:
+        logging.exception("Could not look up published dates for %s", college)
+        return None
+    dates = [stamp for stamp, rows in published.items() if rows]
+    return min(dates, key=lambda d: (abs((d-day).days), d), default=None)
+
+
 async def render_schedule(target, uid: int, day: date, mode: str = "d", page: int = 0, edit: bool = False, group_override=None, temporary=False):
     u = await get_user(uid)
     if not u or not u["group_name"]:
@@ -1892,6 +1913,11 @@ async def render_schedule(target, uid: int, day: date, mode: str = "d", page: in
             if published and day.isoformat() not in {value.isoformat() for value in published}:
                 text += f"\n\nℹ️ На сайте ЯМК сейчас доступно расписание за {published[0]:%d.%m}–{published[-1]:%d.%m.%Y}."
         markup = temporary_schedule_keyboard(group_name, day, mode) if temporary else schedule_keyboard(day, mode)
+    if (not any(schedule.values()) if mode == "w" else not rows):
+        nearest = await nearest_group_day(group_name, day, u.get("college_id", "kuzpk"), u.get("college_branch"))
+        if nearest:
+            prefix = f"gsc|{group_name}" if temporary else "sc"
+            markup.inline_keyboard.insert(0, [InlineKeyboardButton(text=f"Открыть занятия за {nearest:%d.%m}", callback_data=f"{prefix}|d|{nearest:%Y%m%d}|0")])
     if edit: await safe_edit(target, text, reply_markup=markup)
     else: await target.answer(text, reply_markup=markup)
 
@@ -2360,6 +2386,12 @@ async def calendar_download(request):
                         headers={"Cache-Control": "private, no-store"})
 
 
+async def miniapp_groups(college, branch):
+    if college == "yamk" and branch:
+        return sorted({r["name"] for r in await _yamk_groups_with_import(branch)})
+    return await list_groups(college)
+
+
 async def miniapp_data(request):
     """Serve the signed-in Telegram user’s timetable and requested exports."""
     from aiogram.utils.web_app import safe_parse_webapp_init_data
@@ -2375,10 +2407,6 @@ async def miniapp_data(request):
     if not user or not user.get("college_selected"):
         return web.json_response({"error": "Сначала выбери колледж и группу в боте"}, status=409)
     college = user.get("college_id") or "kuzpk"
-    if college == "kemtip":
-        if request.method == "POST":
-            return web.json_response({"error": "Колледж публикует занятия сканами. Экспорт в календарь пока недоступен."}, status=409)
-        return web.json_response({"college": college, "documents": KEMTIP_SCHEDULES})
     branch = user.get("college_branch")
     today = datetime.now(TZ).date()
     section = request.query.get("section", "schedule")
@@ -2404,17 +2432,23 @@ async def miniapp_data(request):
         key = token_urlsafe(24)
         _calendar_downloads[key] = (now + 900, group_calendar(days, group))
         return web.json_response({"path": f"/calendar/{key}.ics"})
+    available = {"timezone": TZ.key}
     if section == "week":
         selected = request.query.get("group", "").strip() or user.get("group_name")
         if not selected:
-            return web.json_response({"error": "Выбери основную группу в боте"}, status=409)
+            groups = await miniapp_groups(college, branch)
+            return web.json_response({"section": section, "college": college, "date": day.isoformat(), "group": "", "rows": [], "days": {}, "groups": groups, "items": groups})
         monday = day - timedelta(days=day.weekday())
         week = await get_week_schedule(selected, monday, college, branch)
         payload = {d.isoformat(): rows for d, rows in week.items()}
-        groups = await list_groups(college)
+        if not any(week.values()):
+            nearest = await nearest_group_day(selected, day, college, branch)
+            if nearest:
+                available["nearest"] = nearest.isoformat()
+        groups = await miniapp_groups(college, branch)
         return web.json_response({"section": section, "college": college, "group": selected,
                                   "date": day.isoformat(), "week_start": monday.isoformat(),
-                                  "days": payload, "items": groups, "groups": groups})
+                                  "days": payload, "items": groups, "groups": groups, **available})
     if section == "history":
         selected = request.query.get("group", "").strip() or user.get("group_name")
         snapshots = await get_auto_schedule_snapshots(college)
@@ -2428,24 +2462,31 @@ async def miniapp_data(request):
         names = await get_entity_names(kind, college, branch)
         items = [name for name in names if query in name.casefold()][:100]
         selected = request.query.get("name", "")
-        rows = await get_entity_schedule(kind, selected, day, college, branch) if selected in names else []
-        selected_group = (request.query.get("group", "").strip() or user.get("group_name")) if kind == "teacher" else ""
+        rows = []
+        if selected in names:
+            day, rows = await entity_day(kind, selected, day, college, branch, request.query.get("nearest") == "1")
+        selected_group = request.query.get("group", "").strip() if kind == "teacher" else ""
         if selected_group:
             rows = [row for row in rows if str(row.get("group", "")).strip().casefold() == selected_group.casefold()]
     else:
         selected = request.query.get("group", "").strip() or user.get("group_name")
         if not selected:
-            return web.json_response({"error": "Выбери основную группу в боте"}, status=409)
+            groups = await miniapp_groups(college, branch)
+            return web.json_response({"section": section, "college": college, "date": day.isoformat(), "group": "", "rows": [], "days": {}, "groups": groups, "items": groups})
         rows = await get_schedule(selected, day, college, branch)
-        items = await list_groups(college)
+        if not rows:
+            nearest = await nearest_group_day(selected, day, college, branch)
+            if nearest:
+                available["nearest"] = nearest.isoformat()
+        items = await miniapp_groups(college, branch)
         q = request.query.get("q", "").strip().casefold()
         if q:
             items = [name for name in items if q in name.casefold()][:100]
     rows.sort(key=lambda item: (int(item.get("lesson_no") or 0) if str(item.get("lesson_no") or "").isdigit() else 999,
                                 str(item.get("start") or "")))
-    groups = items if section == "schedule" else await list_groups(college)
+    groups = items if section == "schedule" else await miniapp_groups(college, branch)
     return web.json_response({"section": section, "college": college, "group": selected if section == "schedule" else (selected_group if section in ("teachers", "rooms") else user.get("group_name")),
-                              "date": day.isoformat(), "items": items, "groups": groups, "rows": rows})
+                              "date": day.isoformat(), "items": items, "groups": groups, "rows": rows, **available})
 
 
 async def start_miniapp_server():
