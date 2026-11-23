@@ -25,7 +25,7 @@ window.Agenda = (() => {
     return m && +m[1] < 24 && +m[2] < 60 ? 60 * +m[1] + +m[2] : null;
   };
 
-  let active = '', period = 'schedule', kind = 'teachers', entity = '', query = '';
+  let active = '', period = document.body.classList.contains('trial') ? 'week' : 'schedule', kind = 'teachers', entity = '', query = '';
   let pickedGroup = '', homeGroup = '', groups = [], college = '';
   let date = iso(new Date()), followToday = true, response = null;
   let campusZone;
@@ -162,6 +162,14 @@ window.Agenda = (() => {
           '</ul>' : '<p class="ag-empty">Совпадений нет. Попробуй другое написание.</p>');
     } else if (active === 'day' && period === 'week') {
       const days = Object.entries(response.days || {}).sort(([a],[b]) => a.localeCompare(b));
+      if (document.body.classList.contains('trial') && days.length) {
+        slot.innerHTML = days.map(([stamp, items]) => {
+          const times = items.flatMap(r => [r.start, r.end]).filter(Boolean).sort();
+          const hours = times.length ? times[0] + ' — ' + times[times.length-1] : items.length ? amount(items.length) : 'Нет занятий';
+          return '<button class="planner-day" data-planner-day="' + esc(stamp) + '"><span class="planner-label"><b>' + esc(fmt(stamp,{weekday:'long'})) + '</b><em>→ ' + Number(stamp.slice(-2)) + '</em></span><span class="planner-hours' + (items.length ? '' : ' off') + '">' + esc(hours) + '</span><span class="planner-count">' + (items.length ? esc(amount(items.length)) : '') + '</span></button>';
+        }).join('');
+        if (!response.nearest) return;
+      } else
       slot.innerHTML = days.map(([stamp,items]) => '<section class="ag-weekday">' + dayContent(items, stamp) + '</section>').join('') ||
         '<p class="ag-empty">Расписание на эту неделю пока не опубликовано.</p>';
     } else {
@@ -186,6 +194,7 @@ window.Agenda = (() => {
     try {
       const payload = await ui().api(params, pending.signal);
       if (pending.signal.aborted) return;
+      if (payload.previewDate && followToday) { date = payload.previewDate; followToday = false; paintChrome(); return fetchData(); }
       response = payload;
       if (college && payload.college !== college && pickedGroup) {
         pickedGroup = ''; homeGroup = ''; groups = []; college = payload.college;
@@ -224,6 +233,7 @@ window.Agenda = (() => {
     fetchData();
   }
   function activate(button) {
+    if (button.dataset.plannerDay) { period = "schedule"; return move(button.dataset.plannerDay); }
     const key = button.dataset.favorite;
     if (key !== undefined) {
       const values = keys(), hadKey = values.includes(key);

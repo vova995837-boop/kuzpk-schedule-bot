@@ -42,6 +42,7 @@
 
   async function api(params, signal, exportDay = false) {
     const initData = window.Telegram?.WebApp?.initData;
+    if (!initData && window.PlannerPreview) return window.PlannerPreview.api(params, exportDay);
     if (!initData) throw errorWithStatus('Открой мини-приложение из меню бота в Telegram.', 401);
     const url = new URL(exportDay ? '/api/miniapp/export' : '/api/miniapp', window.location.origin);
     url.search = new URLSearchParams(params);

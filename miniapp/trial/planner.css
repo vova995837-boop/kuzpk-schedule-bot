@@ -1,0 +1,28 @@
+@font-face{font-family:Caveat;src:url('./caveat.ttf') format('truetype');font-weight:400 700;font-display:swap}
+:root{--paper:#f5f2ef;--ink:#111;--navy:#171717;--muted:#55514e;--line:#171717;--accent:#1685d4;--pen:#106dae;--red:#cd1e30;--hand:Caveat,cursive}
+.trial .layout{display:block;max-width:1140px;margin:auto}
+.trial .mast{position:static;width:auto;height:auto;display:flex;flex-direction:row;align-items:center;justify-content:space-between;background:transparent;color:var(--ink);border-bottom:2px solid;margin:0 var(--gutter);padding:18px 0;gap:18px}
+.trial .identity{gap:8px}.trial .signet{width:15px}.trial .signet i{background:var(--red);width:14px}
+.demo-label{font:500 18px var(--hand);color:var(--pen);transform:rotate(-5deg)}
+.trial .destinations{display:flex;gap:12px}.trial .destinations button{position:relative;color:var(--ink);border:0;padding:7px 14px;justify-content:center}
+.trial .destinations button[aria-current=page]:after{content:'';position:absolute;inset:3px 0;border:1.8px solid var(--pen);border-radius:48% 54% 46% 43%;transform:rotate(-3deg);animation:ink .22s ease-out}
+.trial .school{color:var(--ink);margin:0}.trial .school-dot{background:var(--red)}
+.trial #screen{max-width:920px;padding-top:clamp(22px,4vw,50px)}
+.trial .ag-heading h1,.trial .nb h1{text-transform:uppercase;font:900 clamp(2rem,6vw,4.6rem)/1 Arial,sans-serif;letter-spacing:-.06em}
+.trial .ag-segments,.trial .ag-group,.trial .ag-date,.trial .nb-block,.trial .nb-menu,.trial .nb-action,.trial input,.trial textarea{border-radius:0}
+.trial .ag-segments{border:1px solid;background:none}.trial .ag-segments button{border-radius:0}
+.trial .ag{--ag-soft:#ece7e0;--ag-focus:var(--pen)}
+.trial .ag-group{background:transparent}.trial .ag-month strong{font:600 25px var(--hand);color:var(--pen)}
+.trial .ag-date b{font:650 29px var(--hand);color:var(--red)}.trial .ag button.ag-date.chosen{border:1px solid var(--ink);background:transparent}
+.trial .ag-calendar:has(+ * ){min-width:0}
+.trial .ag:has(.planner-day) .ag-strip{display:none}
+.planner-day{display:grid;grid-template-columns:minmax(140px,28%) 1fr auto;align-items:center;gap:22px;width:100%;padding:13px 22px;margin:0 0 12px;border:1.7px solid var(--ink);background:transparent;text-align:left;min-height:84px}
+.planner-label{border-right:1px solid;display:grid;line-height:1.1}.planner-label b{text-transform:uppercase;font-size:clamp(.78rem,2vw,1.15rem)}.planner-label em{font:650 37px/.95 var(--hand);color:var(--red)}
+.planner-hours{font:500 clamp(27px,5vw,52px)/1 var(--hand);color:var(--pen);transform:rotate(-1deg)}.planner-hours.off{color:var(--red)}.planner-count{font:12px var(--mono);color:var(--muted)}
+.planner-day:hover{background:white}.planner-day:hover .planner-hours,.trial .ag-jump:hover{text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:5px}
+.trial .ag-ticket{background:transparent;border:2px solid;border-radius:0;color:var(--ink)}.trial .ag-ticket::after{display:none}.trial .ag-ticket p,.trial .ag-ticket-stub span{color:var(--muted)}.trial .ag-ticket-stub strong,.trial .ag-time b,.trial .nb-metric{font-family:var(--hand);color:var(--pen)}.trial .ag-time b{font-size:22px}
+.trial .ag-line{border-bottom:1px solid #b7b2ab}.trial .ag-line.live{background:white}.trial .nb-block,.trial .nb-menu{border:1px solid var(--ink);background:transparent}
+@keyframes ink{from{clip-path:inset(0 100% 0 0)}to{clip-path:inset(0)}}
+@media(max-width:650px){.trial .mast{flex-wrap:wrap;gap:8px;padding:12px 0 5px}.trial .destinations{width:100%;order:3;justify-content:space-between;gap:0}.trial .destinations button{padding:6px 8px}.planner-day{grid-template-columns:minmax(96px,37%) 1fr;gap:12px;padding:10px 12px;min-height:72px}.planner-count{display:none}.planner-label em{font-size:32px}.trial .ag-heading h1{font-size:clamp(30px,8vw,46px)}}
+@media(prefers-reduced-motion:reduce){.trial *, .trial *::after{animation:none!important;transition:none!important}}
+.trial .destinations{flex-direction:row}.trial .destinations button[aria-current=page]{background:transparent}.trial .school{border:0;padding:0}
